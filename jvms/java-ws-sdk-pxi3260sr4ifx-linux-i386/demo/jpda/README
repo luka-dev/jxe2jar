@@ -1,6 +1,0 @@
-
-Please extract the files from examples.jar as shown below and refer to the
-documentation in com/sun/tools/example/doc/index.html
-
-  jar -xvf examples.jar
-
