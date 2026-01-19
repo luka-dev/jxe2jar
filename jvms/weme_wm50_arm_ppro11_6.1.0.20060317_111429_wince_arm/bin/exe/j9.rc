@@ -1,0 +1,112 @@
+
+#include <windows.h>
+#include <winver.h>
+#include "j9cfg.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 2,3,0,0
+ PRODUCTVERSION 2,3,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+	BLOCK "StringFileInfo"
+	BEGIN
+		BLOCK "040904b0"
+		BEGIN
+			VALUE "CompanyName", "International Business Machines Corporation\0"
+			VALUE "FileDescription", "WebSphere Studio Device Developer\0"
+			VALUE "FileVersion", "R2.3 (" EsBuildVersionString ")\0"
+			VALUE "InternalName", "j9\0"
+			VALUE "LegalCopyright", " © Copyright IBM Corp. 1991, 2006\0"
+			VALUE "OriginalFilename", "j9.exe\0"
+			VALUE "ProductName", "IBM SDK, Java(tm) 2 Technology Edition\0"
+			VALUE "ProductVersion", "R2.3\0"
+		END
+	END
+	BLOCK "VarFileInfo"
+	BEGIN
+		VALUE "Translation", 0x0409, 1200
+	END
+END
+
+100	ICON	DISCARDABLE	"..\include\j9.ico"
+
+#define IDM_MAIN_MENUITEM1              401
+#define IDM_MAIN_MENUITEM2              402
+#define IDS_MAIN_MENUITEM1              410
+#define IDS_MAIN_MENUITEM2              411
+#define IDM_MAIN_MENU                   450
+
+#define IDM_EXIT                        205
+#define IDM_COPY                        207
+#define IDM_PASTE                       208
+
+#if !defined(WCEOLE_ENABLE_DIALOGEX)
+#define DIALOGEX DIALOG DISCARDABLE
+#endif
+
+#include <commctrl.h>
+#define  SHMENUBAR RCDATA
+#if defined(J9POCKETPC)
+#include <aygshell.h>
+#define AFXCE_IDR_SCRATCH_SHMENU  28700
+#else
+#define I_IMAGENONE		(-2)
+#define NOMENU			0xFFFF
+#define IDS_SHNEW		1
+#define IDM_SHAREDNEW        10
+#define IDM_SHAREDNEWDEFAULT 11
+#endif
+#define AFXCE_IDD_SAVEMODIFIEDDLG 28701
+
+IDM_MAIN_MENU RCDATA DISCARDABLE
+BEGIN
+    IDM_MAIN_MENU, 2,
+    I_IMAGENONE, IDM_MAIN_MENUITEM1, TBSTATE_ENABLED, 
+    TBSTYLE_DROPDOWN | TBSTYLE_AUTOSIZE, IDS_MAIN_MENUITEM1, 0, 0,
+    I_IMAGENONE, IDM_MAIN_MENUITEM2, TBSTATE_ENABLED, 
+    TBSTYLE_DROPDOWN | TBSTYLE_AUTOSIZE, IDS_MAIN_MENUITEM2, 0, 1,
+END
+
+#if defined(J9POCKETPC)
+// Command bar Pocket PC - no shortcuts
+IDM_MAIN_MENU MENU DISCARDABLE 
+BEGIN
+    POPUP "File"
+    BEGIN
+        MENUITEM "Close",  IDM_EXIT
+    END
+    POPUP "Edit"
+    BEGIN
+        MENUITEM "Copy",  IDM_COPY
+        MENUITEM "Paste", IDM_PASTE
+    END
+END
+STRINGTABLE DISCARDABLE 
+BEGIN
+    IDS_MAIN_MENUITEM1 "File"
+	IDS_MAIN_MENUITEM2 "Edit"
+END
+#else
+// Command bar HPC and others - shortcuts
+IDM_MAIN_MENU MENU DISCARDABLE 
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Close",  IDM_EXIT
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Copy",  IDM_COPY
+        MENUITEM "&Paste", IDM_PASTE
+    END
+END
+STRINGTABLE DISCARDABLE 
+BEGIN
+    IDS_MAIN_MENUITEM1 "&File"
+	IDS_MAIN_MENUITEM2 "&Edit"
+END
+#endif

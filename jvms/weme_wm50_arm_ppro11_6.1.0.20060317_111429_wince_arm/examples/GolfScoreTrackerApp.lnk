@@ -1,0 +1,1 @@
+255#"\J9\PPRO11\bin\j9w.exe" "-jcl:ppro11" "-cp" "\J9\PPRO11\examples\GolfScoreTrackerApp.jar" "com.ibm.weme.examples.golftracker.awt.GolfScoreTrackerApp"

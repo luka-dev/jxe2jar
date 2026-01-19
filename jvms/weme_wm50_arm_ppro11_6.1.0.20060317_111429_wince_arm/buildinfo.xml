@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<buildinfo>
+    <!--Build Information-->
+    <!-- Created: Fri, Mar 17, 2006 at 11:18:13 AM -->
+    <build>20060317-111429</build>
+    <package>weme-wm50-arm-ppro11</package>
+    <name>WEME Windows Mobile 5.0 ARM (Personal Profile 1.1)</name>
+    <type>Milestone II-e Release Candidate</type>
+    <dropsUsed>
+        <drop>216-ppro-wm2003-armv4-v20060313.zip</drop>
+        <drop>copyright.txt</drop>
+        <drop>install.pdf</drop>
+        <drop>j9jcl_23_20060316_5779.zip</drop>
+        <drop>R23.j9.ce_wm2003.arm-32.20060316_5779.zip</drop>
+        <drop>wm5-ppro11.zip</drop>
+    </dropsUsed>
+</buildinfo>
+

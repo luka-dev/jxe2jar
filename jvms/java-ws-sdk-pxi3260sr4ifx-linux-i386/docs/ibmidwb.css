@@ -1,0 +1,147 @@
+/* IBM IDWB XHTML Stylesheet V1.0 */
+
+body {color: black; background-color: white; margin-left: 10px; padding-top: 0.2em }
+
+span.mv { font-style: italic }
+span.md { text-decoration: line-through }
+span.pk { font-weight: bold }
+span.pkdef { font-weight: bold; text-decoration: underline }
+span.pv { font-style: italic }
+span.pvdef { font-style: italic; text-decoration: underline }
+span.kwd { font-weight: bold }
+span.kdwdef {font-weight: bold; text-decoration: underline }
+span.oper { font-style:normal }
+span.operdef { text-decoration: underline }
+span.var { font-style: italic }
+span.vardef  { font-style: italic; text-decoration: underline }
+
+div.dangertitle { margin-top: 1em; font-weight: bold }
+div.danger { padding: 5px 5px 5px 5px; border: solid; border-width: thin; font-weight: bold; margin-top: 2px }
+
+div.cautiontitle { margin-top: 1em; font-weight: bold }
+div.caution { font-weight: bold }
+
+div.attention { margin-top: 1em }
+span.attentiontitle { font-weight: bold }
+
+
+div.notetitle { font-weight: bold }
+div.notebody { margin-left: 2em }
+div.note-noindent { margin-top: 1em; margin-bottom: 1em }
+span.notetitle {font-weight: bold }
+
+div.fnnum { float: left }
+div.fntext { margin-left: 2em }
+
+div.stepl { margin-left: 2em }
+div.steplnum { float: left }
+div.stepltext { margin-left: 5em }
+
+div.notelisttitle { font-weight: bold }
+
+div.warningtitle { font-weight: bold }
+div.warningbody { margin-left: 2em }
+
+ul.simple { list-style-type: none }
+
+h2 { font-size:13pt; font-weight:bold }
+h3 { font-size:13pt; font-weight:bold }
+h4 { font-size:13pt; font-weight:bold }
+h5 { font-size:13pt; font-weight:bold }
+h6 { font-size:13pt; font-weight:bold }
+
+div.headtitle { font-size: 11pt; font-weight:bold; margin-left: 0em }
+div.head0 { font-size: 12pt; font-weight:bold; margin-left: 0em; margin-top:0.5em; border-top: solid; border-width: thin }
+div.head1 { font-size: 10pt; font-weight:bold; margin-left: 1em; padding-top:0.5em; text-indent: -1em }
+div.head2 { font-size: 9pt; font-weight:normal; margin-left: 2em; text-indent: -1em }
+div.head3 { font-size: 9pt; font-weight:normal; margin-left: 3em; text-indent: -1em }
+div.head4 { font-size: 9pt; font-weight:normal; margin-left: 4em; text-indent: -1em }
+div.head5 { font-size: 9pt; font-weight:normal; margin-left: 5em; text-indent: -1em }
+div.head6 { font-size: 9pt; font-weight:normal; margin-left: 6em; text-indent: -1em }
+div.head7 { font-size: 9pt; font-weight:normal; margin-left: 7em; text-indent: -1em }
+div.head8 { font-size: 9pt; font-weight:normal; margin-left: 8em; text-indent: -1em }
+div.head9 { font-size: 9pt; font-weight:normal; margin-left: 9em; text-indent: -1em }
+a.toclink { text-decoration: none }
+a.toclink:hover { text-decoration: underline }
+a.ptoclink { text-decoration: none }
+a.ptoclink:hover { text-decoration: underline }
+a.indexlink { text-decoration: none }
+a.indexlink:hover { text-decoration: underline }
+a.figurelist { text-decoration: none }
+a.figurelist:hover { text-decoration: underline }
+a.tablelist { text-decoration: none }
+a.tablelist:hover { text-decoration: underline }
+
+ul.indexlist { list-style-type: none }
+
+div.ledi { margin-left: 3em }
+div.ledesc { margin-left: 3em }
+
+span.pblktitle { font-weight: bold }
+div.pblklblbox { padding: 5px 5px 5px 5px; border: solid; border-width: thin; margin-top: 2px }
+span.ednoticestitle { font-weight: bold }
+
+span.term { font-weight: bold }
+span.idxshow { color: green }
+div.msg { padding: 1px 5px 5px 5px; border-top: solid; border-width: thin; margin-top: 2px; margin-bottom: 2px }
+div.msgnum { float: left; font-weight: bold; margin-bottom: 1em; margin-right: 1em }
+div.code { font-weight: bold; margin-bottom: 1em }
+div.msgtext { font-weight: bold; margin-bottom: 1em }
+div.msgitemtitle { font-weight: bold }
+p.msgitem { margin-top: 0em }
+span.version { font-weight: bold; font-style: italic }
+span.release { font-weight: bold; font-style: italic }
+span.refkey { font-weight: bold; color: white; background-color: black }
+tt.apl { font-style: italic }
+
+span.figcap { font-style: italic }
+span.figdesc { font-style: italic }
+div.figbox { padding: 5px 5px 5px 5px; border: solid; border-width: thin; margin-top: 2px }
+div.figrules { padding: 5px 5px 5px 5px; border-top: solid; border-bottom: solid; border-width: thin; margin-top: 2px }
+div.fignone { padding: 5px 5px 5px 5px; border: none; border-width: thin; margin-top: 2px }
+
+div.qualifstart { padding: 1px 5px 5px 5px; border-top: solid; border-left: solid; border-right: solid; border-width: thin; font-weight: bold; margin-top: 2px; margin-bottom: 2px; text-align: center }
+div.qualifend { padding: 5px 5px 1px 5px; border-bottom: solid; border-left: solid; border-right: solid; border-width: thin; font-weight: bold; margin-bottom: 2px; text-align: center }
+
+div.singlemastpart { font-size:24pt; font-weight:bold; text-align: center }
+td.mastpart {  font-size:24pt; font-weight:bold }
+
+span.breadcrumbs { font-size: 8pt }
+
+caption { text-align: left; font-style: italic }
+table { margin-top: 1em; margin-bottom: 1em }
+.tbldesc { font-style: italic }
+
+div.mmobj { margin-top: 1em; margin-bottom: 1em }
+div.mmobjleft { margin-top: 1em; margin-bottom: 1em; text-align: left }
+div.mmobjcenter { margin-top: 1em; margin-bottom: 1em; text-align: center }
+div.mmobjright { margin-top: 1em; margin-bottom: 1em; text-align: right }
+
+pre.screen { padding: 5px 5px 5px 5px; border: outset; background-color: #CCCCCC; margin-top: 2px; white-space: pre }
+
+.base { font-weight: normal; font-style: normal; font-variant: normal; text-decoration: none } 
+.italic { font-style: italic }
+.bold { font-weight: bold }
+.underlined { text-decoration: underline }
+.bold-italic { font-weight: bold; font-style: italic }
+.smallcaps { font-variant: small-caps }
+.italic-underlined { font-style: italic; text-decoration: underline }
+.bold-underlined { font-weight: bold; text-decoration: underline }
+.bold-italic-underlined { font-weight: bold; font-style: italic; text-decoration: underline }
+.smallcaps-underlined { font-variant: small-caps; text-decoration: underline }
+
+.noshade { background-color: transparent }
+.xlight { background-color: #DADADA }
+.light { background-color: #B0B0B0 }
+.medium { background-color: #8C8C8C }
+.dark { background-color: #6E6E6E }
+.xdark { background-color: #585858 }
+
+#changed {
+    position: absolute;
+    left: 1px;
+    color: black;
+    background-color: white;
+    font-style: normal;
+    font-weight: normal;
+}

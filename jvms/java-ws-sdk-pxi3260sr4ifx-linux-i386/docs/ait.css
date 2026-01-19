@@ -1,0 +1,79 @@
+BODY {
+  border-top-style : none;
+  border-left-style : none;
+  border-right-style : none;
+  border-bottom-style : none;
+  font-size : 14px;
+  font-family : Arial,sans-serif;
+}
+A:hover {
+  BACKGROUND: #ffffff
+;
+}
+P {
+  TEXT-ALIGN : left ;
+}
+H3 {
+	background-color : silver;
+	padding-left : 6px;
+	padding-right : 6px;
+	padding-top : 2px;
+	padding-bottom : 2px;
+	font-size : 16px;
+	font-family : Arial,sans-serif;
+}
+H2 {
+	background-color : gray;
+	PADDING-BOTTOM: 1px;
+	PADDING-LEFT: 4px;
+	PADDING-RIGHT: 4px;
+	PADDING-TOP: 1px;
+	FONT-FAMILY: Arial;
+	color : black;
+  font-size : large;
+}
+H1 {
+	text-align : left;
+	FONT-FAMILY: Arial;
+	padding-top : 1px;
+	padding-left : 1px;
+	padding-right : 1px;
+	padding-bottom : 1px;
+	border-top-style : none;
+	border-right-style : none;
+	border-bottom-style : none;
+	border-left-style : none;
+	font-style : normal;
+}
+DT {
+  FONT-WEIGHT: 700
+;
+}
+.masthead {
+  TEXT-ALIGN: center
+;
+}
+.NOTESID {
+  COLOR: #004400;
+  FONT-FAMILY: Arial
+;
+}
+H4{
+  background-color : silver;
+  font-family : Arial;
+  padding-top : 1px;
+  padding-left : 4px;
+  padding-right : 4px;
+  padding-bottom : 1px;
+}
+TABLE{
+  font-size : 12px;
+  font-family : Arial,sans-serif;
+}
+PRE{
+   background-color : #CCCCCC;
+   }
+CODE{
+   background-color : #CCCCCC;
+   }
+

@@ -1,0 +1,378 @@
+"""Convert IBM J9/CDC JXE (rom.classes) to a standard Java JAR.
+
+This script parses a JXE image and reconstructs .class files that are
+compatible with common JVM tooling. It performs a small set of fixups:
+ - Clamps classfile versions into a JVM-friendly range.
+ - Rewrites J9-specific bytecode patterns to standard JVM bytecode.
+ - Rebuilds constant pool entries (including ConstantValue where possible).
+
+Usage:
+  python3 src/jxe2jar.py input.jxe output.jar
+  python3 src/jxe2jar.py input.jxe output.jar --skip-java-lang
+  python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
+  python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
+
+Notes:
+ - --skip-java-lang skips java/*, javax/*, sun/*, com/sun/*, jdk/* classes.
+ - --skip-libs skips classes already present in a libs/ JAR directory.
+ - --strip-synthetic clears ACC_SYNTHETIC flags for stricter javap output.
+ - Some JXE images embed non-standard metadata; output is best-effort.
+"""
+import argparse
+import io
+import os
+import sys
+import zipfile
+
+from bytecode import transform_bytecode
+from constpool import CONST, ConstPool
+from jxe import JXE, ReaderStream, WriterStream
+
+
+CLASS_FLAG_MASK = (
+    0x0001  # public
+    | 0x0010  # final
+    | 0x0020  # super
+    | 0x0200  # interface
+    | 0x0400  # abstract
+    | 0x1000  # synthetic
+    | 0x2000  # annotation
+    | 0x4000  # enum
+    | 0x8000  # module
+)
+
+FIELD_FLAG_MASK = (
+    0x0001  # public
+    | 0x0002  # private
+    | 0x0004  # protected
+    | 0x0008  # static
+    | 0x0010  # final
+    | 0x0040  # volatile / bridge
+    | 0x0080  # transient / varargs
+    | 0x0100  # synthetic / native
+    | 0x4000  # enum
+)
+
+METHOD_FLAG_MASK = (
+    0x0001  # public
+    | 0x0002  # private
+    | 0x0004  # protected
+    | 0x0008  # static
+    | 0x0010  # final
+    | 0x0020  # synchronized
+    | 0x0040  # bridge
+    | 0x0080  # varargs
+    | 0x0100  # native
+    | 0x0400  # abstract
+    | 0x0800  # strict
+    | 0x1000  # synthetic
+)
+
+
+def dump_romclass(
+    stream, romclass, strip_synthetic: bool = False
+) -> tuple[ConstPool, list]:  # pylint: disable=R0914, R0915
+    """Dumps romclass."""
+    stream.write_raw_bytes(b"\xca\xfe\xba\xbe")
+    # Many ROM classes carry IBM/J9 specific version numbers that don't map
+    # cleanly to HotSpot classfile versions. Clamp them into a sane JVM range
+    # to keep downstream tools (javap/decompilers) happy.
+    target_minor = 0
+    target_major = min(max(romclass.major, 45), 52)
+    stream.write_u16(target_minor)
+    stream.write_u16(target_major)
+    const_pool = ConstPool(romclass)
+    class_name_id = const_pool.add(CONST.CLASS, romclass.class_name)
+    superclass_name_id = const_pool.add(CONST.CLASS, romclass.superclass_name)
+    interface_id_list = []
+    method_info_list = []
+
+    for interface in romclass.interfaces:
+        interface_id_list.append(const_pool.add(CONST.CLASS, interface.name))
+
+    field_info_list = []
+    const_value_attr_name_index = const_pool.add(CONST.UTF8, "ConstantValue")
+
+    field_names = {field.name for field in romclass.fields}
+    has_empty_string = any(
+        getattr(c, "value", None) == ""
+        for c in romclass.constant_pool
+        if getattr(c, "type", None) == 1
+    )
+
+    for field in romclass.fields:
+        access_flags = field.access_flag & FIELD_FLAG_MASK
+        if strip_synthetic:
+            access_flags &= ~0x1000
+        attributes = []
+        const_index = None
+
+        if (
+            field.const_value is not None
+            and (access_flags & 0x0008)
+            and (access_flags & 0x0010)
+        ):
+            sig = field.signature
+            if sig in ("I", "S", "B", "C", "Z"):
+                const_index = const_pool.add(CONST.INTEGER, field.const_value)
+            elif sig == "F":
+                const_index = const_pool.add(CONST.FLOAT, field.const_value)
+            elif sig == "J":
+                if field.const_value2 is not None:
+                    const_index = const_pool.add(
+                        CONST.LONG, (field.const_value2, field.const_value)
+                    )
+            elif sig == "D":
+                if field.const_value2 is not None:
+                    const_index = const_pool.add(
+                        CONST.DOUBLE, (field.const_value2, field.const_value)
+                    )
+            elif sig == "Ljava/lang/String;":
+                if field.const_value < len(romclass.constant_pool):
+                    rom_const = romclass.constant_pool[field.const_value]
+                    if hasattr(rom_const, "value"):
+                        value = rom_const.value
+                        if (
+                            value in field_names
+                            and value != field.name
+                            and not has_empty_string
+                        ):
+                            value = ""
+                        const_index = const_pool.add(CONST.STRING, value)
+
+        if const_index is not None:
+            attributes.append(
+                {
+                    "attribute_name_index": const_value_attr_name_index,
+                    "attribute_length": 2,
+                    "constantvalue_index": const_index,
+                }
+            )
+
+        field_info_list.append(
+            {
+                "access_flags": access_flags,
+                "name_index": const_pool.add(CONST.UTF8, field.name),
+                "descriptor_index": const_pool.add(CONST.UTF8, field.signature),
+                "attributes_count": len(attributes),
+                "attributes": attributes,
+            }
+        )
+
+    code_attr_name_index = const_pool.add(CONST.UTF8, "Code")
+
+    for method in romclass.methods:
+        method_flags = method.modifier & METHOD_FLAG_MASK
+        if strip_synthetic:
+            method_flags &= ~0x1000
+        has_code = not (method_flags & (0x0100 | 0x0400))  # native or abstract
+        bytecode = (
+            transform_bytecode(bytearray(method.bytecode), method.signature, const_pool)
+            if has_code
+            else b""
+        )
+        attributes = []
+        if has_code:
+            attributes.append(
+                {
+                    "attribute_name_index": code_attr_name_index,
+                    "attribute_length": len(bytecode)
+                    + len(method.catch_exceptions) * 8
+                    + 0xC,
+                    "max_stack": method.max_stack,
+                    "max_locals": method.temp_count,
+                    "code_length": len(bytecode),
+                    "code": bytecode,
+                    "exception_table_length": len(method.catch_exceptions),
+                    "exception_table": [
+                        (
+                            exception.start,
+                            exception.end,
+                            exception.handler,
+                            exception.catch_type + 1
+                            if exception.catch_type > 0
+                            else 0,
+                        )
+                        for exception in method.catch_exceptions
+                    ],
+                    "attributes_count": 0,
+                    "attributes": [],
+                }
+            )
+        method_info_list.append(
+            {
+                "access_flags": method_flags,
+                "name_index": const_pool.add(CONST.UTF8, method.name),
+                "descriptor_index": const_pool.add(CONST.UTF8, method.signature),
+                "attributes_count": len(attributes),
+                "attributes": attributes,
+            }
+        )
+
+    const_pool.write(stream)
+
+    class_access_flags = romclass.access_flags & CLASS_FLAG_MASK
+    if strip_synthetic:
+        class_access_flags &= ~0x1000
+    if not (class_access_flags & 0x0200):  # ensure ACC_SUPER for normal classes
+        class_access_flags |= 0x0020
+
+    stream.write_u16(class_access_flags)
+    stream.write_u16(class_name_id)
+    stream.write_u16(superclass_name_id)
+    stream.write_u16(len(interface_id_list))
+
+    for elem in interface_id_list:
+        stream.write_u16(elem)
+
+    stream.write_u16(len(field_info_list))
+
+    for field_info in field_info_list:
+        stream.write_u16(field_info["access_flags"] & 0xFFFF)
+        stream.write_u16(field_info["name_index"])
+        stream.write_u16(field_info["descriptor_index"])
+        stream.write_u16(field_info["attributes_count"])
+        for attr in field_info["attributes"]:
+            stream.write_u16(attr["attribute_name_index"])
+            stream.write_u32(attr["attribute_length"])
+            stream.write_u16(attr["constantvalue_index"])
+
+    stream.write_u16(len(method_info_list))
+
+    for method_info in method_info_list:
+        stream.write_u16(method_info["access_flags"] & 0xFFFF)
+        stream.write_u16(method_info["name_index"])
+        stream.write_u16(method_info["descriptor_index"])
+        stream.write_u16(method_info["attributes_count"])
+        if method_info["attributes_count"]:
+            attribute = method_info["attributes"][0]
+            stream.write_u16(attribute["attribute_name_index"])
+            stream.write_u32(attribute["attribute_length"])
+            stream.write_u16(attribute["max_stack"])
+            stream.write_u16(attribute["max_locals"])
+            stream.write_u32(attribute["code_length"])
+            stream.write_raw_bytes(attribute["code"])
+            stream.write_u16(attribute["exception_table_length"])
+            for exception in attribute["exception_table"]:
+                stream.write_u16(exception[0])
+                stream.write_u16(exception[1])
+                stream.write_u16(exception[2])
+                stream.write_u16(exception[3])
+            stream.write_u16(attribute["attributes_count"])
+            if attribute["attributes_count"]:
+                raise NotImplementedError()
+
+    stream.write_u16(0)
+
+    return method_info_list, const_pool
+
+
+def create_class(romclass, jarfile, strip_synthetic: bool = False) -> None:
+    """Creates class"""
+    class_name = romclass.class_name
+    class_file = f"{class_name}.class"
+    f_stream = io.BytesIO()
+    stream = WriterStream(f_stream)
+    res = dump_romclass(stream, romclass, strip_synthetic=strip_synthetic)
+    stream.write()
+    jarfile.writestr(class_file, f_stream.getvalue())
+    return res
+
+
+def _load_lib_classes(libs_path):
+    """Load set of class names from JAR files in libs directory."""
+    lib_classes = set()
+    if not libs_path or not os.path.exists(libs_path):
+        return lib_classes
+
+    print(f"Loading library classes from {libs_path}...")
+    for filename in os.listdir(libs_path):
+        if not filename.endswith('.jar'):
+            continue
+        jar_path = os.path.join(libs_path, filename)
+        try:
+            with zipfile.ZipFile(jar_path, 'r') as jar:
+                for name in jar.namelist():
+                    if name.endswith('.class') and not name.startswith('META-INF/'):
+                        # Convert path/to/Class.class -> path/to/Class
+                        class_name = name[:-6]  # Remove .class
+                        lib_classes.add(class_name)
+        except Exception as e:
+            print(f"Warning: Failed to read {filename}: {e}")
+
+    print(f"Loaded {len(lib_classes)} classes from libraries")
+    return lib_classes
+
+
+def _should_skip_class(class_name, skip_java_lang, lib_classes):
+    """Check if a class should be skipped."""
+    if skip_java_lang:
+        # Skip standard Java/JVM classes
+        if class_name.startswith(('java/', 'javax/', 'sun/', 'com/sun/', 'jdk/')):
+            return True
+
+    if lib_classes and class_name in lib_classes:
+        return True
+
+    return False
+
+
+def _create_jar(jar_name, jxe, skip_java_lang=False, lib_classes=None, strip_synthetic=False):
+    with zipfile.ZipFile(jar_name, "w") as jar_zipfile:
+        total = len(jxe.image.classes)
+        skipped = 0
+        written = 0
+
+        for idx, romclass in enumerate(jxe.image.classes, 1):
+            if _should_skip_class(romclass.class_name, skip_java_lang, lib_classes):
+                skipped += 1
+                print(f"[{idx}/{total}] {romclass.class_name} (skipped)")
+                continue
+
+            print(f"[{idx}/{total}] {romclass.class_name}")
+            try:
+                create_class(romclass, jar_zipfile, strip_synthetic=strip_synthetic)
+                written += 1
+            except Exception as exc:  # pylint: disable=W0718
+                print("bad class, skip", romclass.class_name, ": ", exc)
+
+        print(f"\nSummary: {written} classes written, {skipped} classes skipped")
+
+
+def _main():
+    parser = argparse.ArgumentParser(
+        description='Convert JXE (J9 ROM) files to JAR format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s input.jxe output.jar
+  %(prog)s input.jxe output.jar --skip-java-lang
+  %(prog)s input.jxe output.jar --skip-java-lang --skip-libs libs/
+  %(prog)s input.jxe output.jar --strip-synthetic
+        """)
+
+    parser.add_argument('jxe_file', help='Input JXE file')
+    parser.add_argument('jar_file', help='Output JAR file')
+    parser.add_argument('--skip-java-lang', action='store_true',
+                        help='Skip standard Java classes (java/*, javax/*, sun/*, etc.)')
+    parser.add_argument('--skip-libs', metavar='DIR',
+                        help='Skip classes found in JAR files in the specified directory')
+    parser.add_argument('--strip-synthetic', action='store_true',
+                        help='Clear ACC_SYNTHETIC flags on classes/methods/fields')
+
+    args = parser.parse_args()
+
+    # Load library classes if specified
+    lib_classes = None
+    if args.skip_libs:
+        lib_classes = _load_lib_classes(args.skip_libs)
+
+    with open(args.jxe_file, "rb") as fp_jar:
+        stream = ReaderStream(fp_jar)
+        jxe = JXE.read(stream)
+        _create_jar(args.jar_file, jxe, args.skip_java_lang, lib_classes,
+                    strip_synthetic=args.strip_synthetic)
+
+
+if __name__ == "__main__":
+    _main()

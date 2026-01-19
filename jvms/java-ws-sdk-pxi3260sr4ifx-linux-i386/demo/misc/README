@@ -1,0 +1,9 @@
+
+This demo displays free and total memory in the Java Virtual Machine.
+
+1. Compile the program:
+	javac JavaMemory.java
+
+2. Run the program:
+	java JavaMemory
+

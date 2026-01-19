@@ -1,0 +1,40 @@
+README.txt
+
+The FileStat class demonstrates the usage of native calls in Java through
+JNI. This class is provided for access to the underlying stat(2) subroutine,
+which may be needed for getting the information about the file named by
+the path parameter. Read, write, or execute permission for the named
+file is not required, but all directories listed in the path leading to
+the file must be searchable.
+
+This FileStat class demonstrates access to stat(2) functionality in Java.
+
+Though it supports the same basic functionality as the C stat(2) API,
+this class currently contains only the important fields like inode, mode,
+nlink, uid, gid, size, atime, mtime & ctime. See man pages of stat(2) for
+info on C API.
+
+FileStat.java is the class, FileStat.c is the supporting JNI code.
+
+FileStatDemo.java is a sample application which uses the FileStat class
+to get the information of the specified file <file>.
+
+To build the FileStat class and FileStatDemo class :
+ javac FileStatDemo.java
+
+To generate the shared library libFileStat.so, run
+
+	gcc  -shared -o libFileStat.so -I<SDK_PATH>/include FileStat.c
+
+Note: When compiling for PowerPC 64-bit JVM, please pass `-m64' option to gcc.
+
+where <SDK_PATH> is path to installed SDK directory.
+
+Please read the man pages of gcc for details on generating shared library.
+
+You will need to set the environment variable LD_LIBRARY_PATH to search the directory 
+containing libFileStat.so.
+
+To run the Demo:
+	java FileStatDemo <file>
+

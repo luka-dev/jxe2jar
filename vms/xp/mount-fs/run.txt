@@ -1,0 +1,1 @@
+-le -noPrecompile -noCompileAheadOfTime -noStripBytecode -startupClass cases.Hello -vmOption -jcl:foun11 -o "\Storage Card\cases.jxe" "\Storage Card\cases.jar"

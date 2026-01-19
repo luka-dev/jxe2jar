@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# @(#)src/plugin/pfm/oji-plugin/controlpanel/ControlPanel, plugin, audevplug, 20061125 1.4.1.13
+# ===========================================================================
+# Licensed Materials - Property of IBM
+# "Restricted Materials of IBM"
+#
+# IBM SDK, Java(tm) 2 Technology Edition, v5.0
+# (C) Copyright IBM Corp. 1998, 2005. All Rights Reserved
+# ===========================================================================
+#
+# Reason  Date      Origin   Description
+# ------  --------  ------   -----------
+# 87788   20050510  nsampath  BLDBRK : plugin library not compiling on xi32, xp32, xp64
+# 89017   20050603  kaaruna  ControlPanel doesnt launch on AIX PPC32
+# ===========================================================================
+
+# Shell Script to run the Java(tm) Plug-in control panel.
+
+ADIR=`dirname $0`
+
+#ibm@87788 - deploy.jar now comes from webstart build
+CLASSPATH=$ADIR/../lib/javaplugin.jar:$ADIR/../lib/deploy.jar
+
+export CLASSPATH
+
+$ADIR/../bin/java -Djavaplugin.version=1.5.0 -Djavaplugin.nodotversion=150 com.sun.deploy.panel.ControlPanel
