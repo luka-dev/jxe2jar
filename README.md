@@ -1,4 +1,4 @@
-# jxe2jar_lsd_jxe
+# jxe2jar
 
 Tools and notes for converting **IBM J9/CDC JXE (rom.classes)** images back to
 standard Java `.class` files / `.jar` archives.
