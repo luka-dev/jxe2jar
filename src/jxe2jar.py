@@ -197,7 +197,13 @@ def dump_romclass(
             method_flags &= ~0x1000
         has_code = not (method_flags & (0x0100 | 0x0400))  # native or abstract
         bytecode = (
-            transform_bytecode(bytearray(method.bytecode), method.signature, const_pool)
+            transform_bytecode(
+                bytearray(method.bytecode),
+                method.signature,
+                const_pool,
+                owner=romclass.class_name,
+                method_name=method.name,
+            )
             if has_code
             else b""
         )

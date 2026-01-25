@@ -20,6 +20,56 @@ class ConstType(int, Enum):
     REF = 4
 
 
+def _consume_field_descriptor(desc: str, idx: int) -> int:
+    """Return next index after a field descriptor starting at idx, or -1."""
+    if idx >= len(desc):
+        return -1
+    ch = desc[idx]
+    if ch == "[":
+        while idx < len(desc) and desc[idx] == "[":
+            idx += 1
+        return _consume_field_descriptor(desc, idx)
+    if ch in "BCDFIJSZ":
+        return idx + 1
+    if ch == "L":
+        end = desc.find(";", idx + 1)
+        if end == -1:
+            return -1
+        return end + 1
+    return -1
+
+
+def _is_field_descriptor(desc: str) -> bool:
+    if not desc:
+        return False
+    end = _consume_field_descriptor(desc, 0)
+    return end == len(desc)
+
+
+def _is_method_descriptor(desc: str) -> bool:
+    if not desc or desc[0] != "(":
+        return False
+    idx = 1
+    while idx < len(desc) and desc[idx] != ")":
+        nxt = _consume_field_descriptor(desc, idx)
+        if nxt == -1:
+            return False
+        idx = nxt
+    if idx >= len(desc) or desc[idx] != ")":
+        return False
+    idx += 1
+    if idx >= len(desc):
+        return False
+    if desc[idx] == "V":
+        return idx + 1 == len(desc)
+    nxt = _consume_field_descriptor(desc, idx)
+    return nxt == len(desc)
+
+
+def _is_descriptor(desc: str) -> bool:
+    return _is_field_descriptor(desc) or _is_method_descriptor(desc)
+
+
 class J9ROMField:
     """J9 Field."""
 
@@ -243,7 +293,7 @@ class J9ROMConstant:
                 self.descriptor = descriptor
 
     @staticmethod
-    def read(stream: BitArray, base, class_name):
+    def read(stream: BitArray, base, class_name, class_count=None):
         """Returns J9 constant from stream."""
         pos = stream.get()
         value = stream.read_u32()
@@ -258,16 +308,30 @@ class J9ROMConstant:
             case ConstType.INT:
                 value = struct.pack("<I", value)
             case _:
+                stream_len = int(stream.len) // 8
+                if class_count is not None and value >= class_count:
+                    value = struct.pack("<II", value, value_type)
+                    value_type = ConstType.LONG
+                    return J9ROMConstant(value_type, value=value)
+
                 class_ptr = base + 8 * value
+                if class_ptr < 0 or class_ptr + 4 > stream_len:
+                    value = struct.pack("<II", value, value_type)
+                    value_type = ConstType.LONG
+                    return J9ROMConstant(value_type, value=value)
                 try:
                     with StreamCursor(stream, class_ptr):
                         _class = stream.read_string_ref()
                     if not _class:
                         _class = class_name
                     ptr = value_type + pos + 4
+                    if ptr < 0 or ptr + 4 > stream_len:
+                        raise ValueError("invalid ref pointer")
                     with StreamCursor(stream, ptr):
                         name = stream.read_string_ref()
                         descriptor = stream.read_string_ref()
+                    if not name or not _is_descriptor(descriptor):
+                        raise ValueError("invalid ref descriptor")
                     return J9ROMConstant(
                         ConstType.REF, _class=_class, name=name, descriptor=descriptor
                     )
@@ -304,7 +368,7 @@ class J9ROMClass:
         self.constant_pool = constant_pool
 
     @staticmethod
-    def read_at(stream: BitArray, class_name: str, class_pointer: int):
+    def read_at(stream: BitArray, class_name: str, class_pointer: int, class_count=None):
         """Returns J9 Class from already resolved pointer."""
         print(f"  -> reading class {class_name!r}")
         with StreamCursor(stream, class_pointer):
@@ -370,7 +434,9 @@ class J9ROMClass:
 
             for i in range(constant_pool_count):
                 try:
-                    constant_pool.append(J9ROMConstant.read(stream, base, class_name))
+                    constant_pool.append(
+                        J9ROMConstant.read(stream, base, class_name, class_count)
+                    )
                 except EOFError:
                     # Usual between ram_constant_pool_count and rom_constant_pool_count
                     # liy double const but in some cases last element contain not valid
@@ -423,7 +489,7 @@ class J9ROMImage:
         classes = []
         for idx, (name, ptr) in enumerate(toc, 1):
             print(f"[TOC] {idx}/{class_count} {name!r}")
-            classes.append(J9ROMClass.read_at(stream, name, ptr))
+            classes.append(J9ROMClass.read_at(stream, name, ptr, class_count))
         stream.set(pos)
 
         return J9ROMImage(

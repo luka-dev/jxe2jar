@@ -266,7 +266,7 @@ def _method_arg_slots(descriptor: str) -> int:
     return slots
 
 
-def transform_bytecode(bytecode, signature, cp):
+def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
     """Transforms bytecode"""
     i = 0
     new_cp_transform = {}
@@ -333,7 +333,10 @@ def transform_bytecode(bytecode, signature, cp):
                     new_index = transform["new_index"]
                     new_index = cp.add(CONST.LONG, (0, cp.get_int(new_index))) - 1
                 else:
-                    print("WARNING: ldc2_w fallback")
+                    where = ""
+                    if owner and method_name:
+                        where = f" in {owner}.{method_name}{signature}"
+                    print(f"WARNING: ldc2_w fallback{where} (cp={index})")
                     # TODO: very dirty hack, because we incorrectly
                     # parse constant pool used in 1 case
                     new_index = 0
