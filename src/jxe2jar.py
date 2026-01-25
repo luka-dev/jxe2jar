@@ -2,26 +2,28 @@
 
 This script parses a JXE image and reconstructs .class files that are
 compatible with common JVM tooling. It performs a small set of fixups:
- - Infers a minimal classfile version from flags/opcodes (min 45, no upper cap).
+ - Infers a minimal classfile version from flags/opcodes (min 46, no upper cap).
  - Rewrites J9-specific bytecode patterns to standard JVM bytecode.
  - Rebuilds constant pool entries (including ConstantValue where possible).
 
 Usage:
   python3 src/jxe2jar.py input.jxe output.jar
-  python3 src/jxe2jar.py input.jxe output.jar --skip-java-lang
   python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
+  python3 src/jxe2jar.py input.jxe output.jar --keep-inner
   python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
 
 Notes:
- - --skip-java-lang skips java/*, javax/*, sun/*, com/sun/*, jdk/* classes.
+ - If src/rt.classes exists, its classes are skipped by default.
+ - Otherwise no JDK/JRE classes are skipped unless --skip-classes is provided.
+ - --skip-classes can point to a custom JAR/JMOD/list file to define the skip list.
  - --skip-libs skips classes already present in a libs/ JAR directory.
+ - --keep-inner keeps classes with '$' in their name (default is to skip).
  - --strip-synthetic clears ACC_SYNTHETIC flags for stricter javap output.
  - Some JXE images embed non-standard metadata; output is best-effort.
 """
 import argparse
 import io
 import os
-import sys
 import zipfile
 
 from bytecode import transform_bytecode
@@ -332,6 +334,18 @@ def create_class(romclass, jarfile, strip_synthetic: bool = False) -> None:
     return res
 
 
+def _collect_classes_from_jar(jar_path):
+    classes = set()
+    try:
+        with zipfile.ZipFile(jar_path, 'r') as jar:
+            for name in jar.namelist():
+                if name.endswith('.class') and not name.startswith('META-INF/'):
+                    classes.add(name[:-6])
+    except Exception as exc:
+        print(f"Warning: Failed to read {jar_path}: {exc}")
+    return classes
+
+
 def _load_lib_classes(libs_path):
     """Load set of class names from JAR files in libs directory."""
     lib_classes = set()
@@ -343,41 +357,77 @@ def _load_lib_classes(libs_path):
         if not filename.endswith('.jar'):
             continue
         jar_path = os.path.join(libs_path, filename)
-        try:
-            with zipfile.ZipFile(jar_path, 'r') as jar:
-                for name in jar.namelist():
-                    if name.endswith('.class') and not name.startswith('META-INF/'):
-                        # Convert path/to/Class.class -> path/to/Class
-                        class_name = name[:-6]  # Remove .class
-                        lib_classes.add(class_name)
-        except Exception as e:
-            print(f"Warning: Failed to read {filename}: {e}")
+        lib_classes |= _collect_classes_from_jar(jar_path)
 
     print(f"Loaded {len(lib_classes)} classes from libraries")
     return lib_classes
 
 
-def _should_skip_class(class_name, skip_java_lang, lib_classes):
-    """Check if a class should be skipped."""
-    if skip_java_lang:
-        # Skip standard Java/JVM classes
-        if class_name.startswith(('java/', 'javax/', 'sun/', 'com/sun/', 'jdk/')):
-            return True
+def _load_classes_from_list_file(list_path):
+    classes = set()
+    try:
+        with open(list_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.endswith(".class"):
+                    line = line[:-6]
+                classes.add(line)
+    except Exception as exc:
+        print(f"Warning: Failed to read {list_path}: {exc}")
+    return classes
 
-    if lib_classes and class_name in lib_classes:
+
+def _load_classes_from_path(path):
+    if not path:
+        return set()
+    if os.path.isdir(path):
+        classes = set()
+        for filename in os.listdir(path):
+            if filename.endswith(".jar"):
+                classes |= _collect_classes_from_jar(os.path.join(path, filename))
+        return classes
+    if path.endswith(".jmod"):
+        classes = set()
+        try:
+            with zipfile.ZipFile(path, "r") as jmod:
+                for name in jmod.namelist():
+                    if name.startswith("classes/") and name.endswith(".class"):
+                        classes.add(name[len("classes/"):-6])
+        except Exception as exc:
+            print(f"Warning: Failed to read {path}: {exc}")
+        return classes
+    if path.endswith(".jar"):
+        return _collect_classes_from_jar(path)
+    return _load_classes_from_list_file(path)
+
+
+def _should_skip_class(class_name, skip_classes, keep_inner):
+    """Check if a class should be skipped."""
+    if not keep_inner and "$" in class_name:
+        return True
+
+    if skip_classes and class_name in skip_classes:
         return True
 
     return False
 
 
-def _create_jar(jar_name, jxe, skip_java_lang=False, lib_classes=None, strip_synthetic=False):
+def _create_jar(
+    jar_name,
+    jxe,
+    skip_classes=None,
+    strip_synthetic=False,
+    keep_inner=False,
+):
     with zipfile.ZipFile(jar_name, "w") as jar_zipfile:
         total = len(jxe.image.classes)
         skipped = 0
         written = 0
 
         for idx, romclass in enumerate(jxe.image.classes, 1):
-            if _should_skip_class(romclass.class_name, skip_java_lang, lib_classes):
+            if _should_skip_class(romclass.class_name, skip_classes, keep_inner):
                 skipped += 1
                 print(f"[{idx}/{total}] {romclass.class_name} (skipped)")
                 continue
@@ -399,32 +449,51 @@ def _main():
         epilog="""
 Examples:
   %(prog)s input.jxe output.jar
-  %(prog)s input.jxe output.jar --skip-java-lang
-  %(prog)s input.jxe output.jar --skip-java-lang --skip-libs libs/
+  %(prog)s input.jxe output.jar --skip-libs libs/
+  %(prog)s input.jxe output.jar --keep-inner
+  %(prog)s input.jxe output.jar --skip-classes path/to/rt.classes
   %(prog)s input.jxe output.jar --strip-synthetic
         """)
 
     parser.add_argument('jxe_file', help='Input JXE file')
     parser.add_argument('jar_file', help='Output JAR file')
-    parser.add_argument('--skip-java-lang', action='store_true',
-                        help='Skip standard Java classes (java/*, javax/*, sun/*, etc.)')
     parser.add_argument('--skip-libs', metavar='DIR',
                         help='Skip classes found in JAR files in the specified directory')
+    parser.add_argument('--skip-classes', metavar='PATH',
+                        help='Skip classes listed in a JAR/JMOD/list file or directory')
     parser.add_argument('--strip-synthetic', action='store_true',
                         help='Clear ACC_SYNTHETIC flags on classes/methods/fields')
+    parser.add_argument('--keep-inner', action='store_true',
+                        help="Keep inner/anonymous classes (default: skip)")
 
     args = parser.parse_args()
 
-    # Load library classes if specified
-    lib_classes = None
+    skip_classes = set()
+
+    if args.skip_classes:
+        skip_classes |= _load_classes_from_path(args.skip_classes)
+        print(f"Loaded {len(skip_classes)} classes from {args.skip_classes}")
+    else:
+        local_rtclasses = os.path.join(os.path.dirname(__file__), "rt.classes")
+        if os.path.isfile(local_rtclasses):
+            skip_classes |= _load_classes_from_list_file(local_rtclasses)
+            print(f"Loaded {len(skip_classes)} classes from {local_rtclasses}")
+        else:
+            print("Warning: No skip list found; not skipping JDK/JRE classes.")
+
     if args.skip_libs:
-        lib_classes = _load_lib_classes(args.skip_libs)
+        skip_classes |= _load_lib_classes(args.skip_libs)
 
     with open(args.jxe_file, "rb") as fp_jar:
         stream = ReaderStream(fp_jar)
         jxe = JXE.read(stream)
-        _create_jar(args.jar_file, jxe, args.skip_java_lang, lib_classes,
-                    strip_synthetic=args.strip_synthetic)
+        _create_jar(
+            args.jar_file,
+            jxe,
+            skip_classes=skip_classes,
+            strip_synthetic=args.strip_synthetic,
+            keep_inner=args.keep_inner,
+        )
 
 
 if __name__ == "__main__":

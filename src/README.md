@@ -13,14 +13,17 @@ Main entry point
 Usage
 ```
 python3 src/jxe2jar.py input.jxe output.jar
-python3 src/jxe2jar.py input.jxe output.jar --skip-java-lang
 python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
+python3 src/jxe2jar.py input.jxe output.jar --keep-inner
 python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
 ```
 
 Flags
-- `--skip-java-lang` skips `java/*`, `javax/*`, `sun/*`, etc.
+- If `src/rt.classes` exists, its classes are skipped by default.
+- If no skip list is found, no JDK/JRE classes are skipped unless `--skip-classes` is provided.
+- `--skip-classes PATH` skips classes from a JAR/JMOD/list file (or a directory of JARs).
 - `--skip-libs DIR` skips classes present in JARs under `DIR`.
+- `--keep-inner` keeps classes with `$` in their name (default is to skip).
 - `--strip-synthetic` clears ACC_SYNTHETIC on classes/methods/fields (for strict javap).
 
 Key logic and format knowledge
@@ -41,7 +44,7 @@ Key logic and format knowledge
   - J9 return opcodes mapped to standard returns.
 
 Output classfile notes
-- Classfile version is inferred from flags/opcodes with a minimum of 45 (no upper cap).
+- Classfile version is inferred from flags/opcodes with a minimum of 46 (no upper cap).
 - ACC_SUPER is enforced for non‑interfaces.
 - ACC_SYNTHETIC is preserved unless `--strip-synthetic` is used.
 

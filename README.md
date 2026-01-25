@@ -14,7 +14,7 @@ What this repo contains
 Parsing / conversion logic differences (core code)
 - Classfile version
   - Before: wrote ROM class version as-is (can be non-standard).
-  - Now: infers minimal version from flags/opcodes (min 45, no upper cap).
+  - Now: infers minimal version from flags/opcodes (min 46, no upper cap).
 - Field parsing and constants
   - Before: ignored ROM field constant values.
   - Now: J9ROMField captures constant slots (const_value/const_value2/const_value3) and jxe2jar.py emits ConstantValue for static final fields (int/float/long/double/String).
@@ -32,7 +32,7 @@ Parsing / conversion logic differences (core code)
   - Now: --strip-synthetic option clears ACC_SYNTHETIC on classes/methods/fields for strict tooling.
 - CLI behavior
   - Before: minimal "python JXE2JAR.py input.jxe output.jar".
-  - Now: argparse with options like --skip-java-lang, --skip-libs, and --strip-synthetic.
+  - Now: argparse with options like --skip-libs, --strip-synthetic, and --keep-inner (JDK/JRE classes are auto-skipped by default).
 
 Testing workflow
 1) Build edge‑case JAR:  
@@ -42,9 +42,11 @@ Testing workflow
    `python3 src/jxe2jar.py input.jxe output.jar`
 
 Notes
+- If `src/rt.classes` exists, its classes are skipped by default (used as the JDK/JRE class list).
+- If no skip list is found, no JDK/JRE classes are skipped unless `--skip-classes` is provided.
 - The converter preserves `ACC_SYNTHETIC` by default.  
   Use `--strip-synthetic` if you need strict `javap` output for 45.0 classes.
-- Classfile versions are inferred from flags/opcodes with a minimum of 45 (no upper cap).
+- Classfile versions are inferred from flags/opcodes with a minimum of 46 (no upper cap).
 - Some large binaries/ISOs are referenced via `.url` files that point to the original archives:
   - `vms/xp/en_vs_2005_pro_dvd.iso.url`
   - `vms/xp/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso.url`
