@@ -9,15 +9,14 @@ compatible with common JVM tooling. It performs a small set of fixups:
 Usage:
   python3 src/jxe2jar.py input.jxe output.jar
   python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
-  python3 src/jxe2jar.py input.jxe output.jar --keep-inner
+  python3 src/jxe2jar.py input.jxe output.jar --skip-jdk /path/to/rt.jar
   python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
 
 Notes:
- - If src/rt.classes exists, its classes are skipped by default.
- - Otherwise no JDK/JRE classes are skipped unless --skip-classes is provided.
- - --skip-classes can point to a custom JAR/JMOD/list file to define the skip list.
+ - JDK/JRE classes are skipped by default using src/rt.classes.
+ - --skip-jdk can point to a custom JAR/JMOD/list file (e.g. rt.jar).
+ - --skip-classes can add additional classes to skip.
  - --skip-libs skips classes already present in a libs/ JAR directory.
- - --keep-inner keeps classes with '$' in their name (default is to skip).
  - --strip-synthetic clears ACC_SYNTHETIC flags for stricter javap output.
  - Some JXE images embed non-standard metadata; output is best-effort.
 """
@@ -403,11 +402,8 @@ def _load_classes_from_path(path):
     return _load_classes_from_list_file(path)
 
 
-def _should_skip_class(class_name, skip_classes, keep_inner):
+def _should_skip_class(class_name, skip_classes):
     """Check if a class should be skipped."""
-    if not keep_inner and "$" in class_name:
-        return True
-
     if skip_classes and class_name in skip_classes:
         return True
 
@@ -419,7 +415,6 @@ def _create_jar(
     jxe,
     skip_classes=None,
     strip_synthetic=False,
-    keep_inner=False,
 ):
     with zipfile.ZipFile(jar_name, "w") as jar_zipfile:
         total = len(jxe.image.classes)
@@ -427,7 +422,7 @@ def _create_jar(
         written = 0
 
         for idx, romclass in enumerate(jxe.image.classes, 1):
-            if _should_skip_class(romclass.class_name, skip_classes, keep_inner):
+            if _should_skip_class(romclass.class_name, skip_classes):
                 skipped += 1
                 print(f"[{idx}/{total}] {romclass.class_name} (skipped)")
                 continue
@@ -450,7 +445,7 @@ def _main():
 Examples:
   %(prog)s input.jxe output.jar
   %(prog)s input.jxe output.jar --skip-libs libs/
-  %(prog)s input.jxe output.jar --keep-inner
+  %(prog)s input.jxe output.jar --skip-jdk /path/to/rt.jar
   %(prog)s input.jxe output.jar --skip-classes path/to/rt.classes
   %(prog)s input.jxe output.jar --strip-synthetic
         """)
@@ -459,27 +454,31 @@ Examples:
     parser.add_argument('jar_file', help='Output JAR file')
     parser.add_argument('--skip-libs', metavar='DIR',
                         help='Skip classes found in JAR files in the specified directory')
+    parser.add_argument('--skip-jdk', nargs='?', const='__DEFAULT__', metavar='PATH',
+                        help='Skip JDK/JRE classes (default: src/rt.classes, or provide rt.jar)')
     parser.add_argument('--skip-classes', metavar='PATH',
                         help='Skip classes listed in a JAR/JMOD/list file or directory')
     parser.add_argument('--strip-synthetic', action='store_true',
                         help='Clear ACC_SYNTHETIC flags on classes/methods/fields')
-    parser.add_argument('--keep-inner', action='store_true',
-                        help="Keep inner/anonymous classes (default: skip)")
 
     args = parser.parse_args()
 
     skip_classes = set()
 
-    if args.skip_classes:
-        skip_classes |= _load_classes_from_path(args.skip_classes)
-        print(f"Loaded {len(skip_classes)} classes from {args.skip_classes}")
+    if args.skip_jdk and args.skip_jdk != "__DEFAULT__":
+        skip_classes |= _load_classes_from_path(args.skip_jdk)
+        print(f"Loaded {len(skip_classes)} classes from {args.skip_jdk}")
     else:
         local_rtclasses = os.path.join(os.path.dirname(__file__), "rt.classes")
         if os.path.isfile(local_rtclasses):
             skip_classes |= _load_classes_from_list_file(local_rtclasses)
             print(f"Loaded {len(skip_classes)} classes from {local_rtclasses}")
         else:
-            print("Warning: No skip list found; not skipping JDK/JRE classes.")
+            print("Warning: src/rt.classes not found; not skipping JDK/JRE classes.")
+
+    if args.skip_classes:
+        skip_classes |= _load_classes_from_path(args.skip_classes)
+        print(f"Loaded {len(skip_classes)} classes from {args.skip_classes}")
 
     if args.skip_libs:
         skip_classes |= _load_lib_classes(args.skip_libs)
@@ -490,9 +489,8 @@ Examples:
         _create_jar(
             args.jar_file,
             jxe,
-            skip_classes=skip_classes,
+            skip_classes=skip_classes if skip_classes else None,
             strip_synthetic=args.strip_synthetic,
-            keep_inner=args.keep_inner,
         )
 
 

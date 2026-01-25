@@ -14,16 +14,15 @@ Usage
 ```
 python3 src/jxe2jar.py input.jxe output.jar
 python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
-python3 src/jxe2jar.py input.jxe output.jar --keep-inner
+python3 src/jxe2jar.py input.jxe output.jar --skip-jdk /path/to/rt.jar
 python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
 ```
 
 Flags
-- If `src/rt.classes` exists, its classes are skipped by default.
-- If no skip list is found, no JDK/JRE classes are skipped unless `--skip-classes` is provided.
-- `--skip-classes PATH` skips classes from a JAR/JMOD/list file (or a directory of JARs).
+- JDK/JRE classes are skipped by default using `src/rt.classes`.
+- `--skip-jdk PATH` overrides the JDK/JRE skip list (e.g. `rt.jar`).
+- `--skip-classes PATH` adds classes from a JAR/JMOD/list file (or a directory of JARs).
 - `--skip-libs DIR` skips classes present in JARs under `DIR`.
-- `--keep-inner` keeps classes with `$` in their name (default is to skip).
 - `--strip-synthetic` clears ACC_SYNTHETIC on classes/methods/fields (for strict javap).
 
 Key logic and format knowledge
