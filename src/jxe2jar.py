@@ -71,8 +71,8 @@ METHOD_FLAG_MASK = (
 
 def _infer_classfile_major(romclass) -> int:
     """Infer the minimal classfile major version required by class features."""
-    # CDC/J9 targets old classfiles; start from Java 1.1 baseline (45).
-    required = 45
+    # CDC/J9 targets old classfiles; start from Java 1.2 baseline (46).
+    required = 46
 
     # Class-level flags that require Java 5+.
     if romclass.access_flags & (0x2000 | 0x4000):  # annotation/enum
@@ -103,8 +103,8 @@ def _infer_classfile_major(romclass) -> int:
         if method.bytecode and 0xBA in method.bytecode:
             required = max(required, 51)
 
-    # Keep at least 45; allow higher versions when required by flags/opcodes.
-    return max(required, 45)
+    # Keep at least 46; allow higher versions when required by flags/opcodes.
+    return max(required, 46)
 
 
 def dump_romclass(
