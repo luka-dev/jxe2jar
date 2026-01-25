@@ -79,6 +79,7 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
 - Use `--skip-classes` to provide additional JAR/JMOD/list files or a directory.
 - The converter preserves `ACC_SYNTHETIC` by default. Use `--strip-synthetic` if you need strict `javap` output for 45.0 classes.
 - Classfile versions are inferred from flags/opcodes with a minimum of 46 (no upper cap).
+- InnerClasses attributes are synthesized from naming (`Outer$Inner`) on both inner and outer classes, unless `--no-inner-classes` is set.
 - Some large binaries/ISOs are referenced via `.url` files pointing to original archives:
   - `vms/xp/en_vs_2005_pro_dvd.iso.url`
   - `vms/xp/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso.url`

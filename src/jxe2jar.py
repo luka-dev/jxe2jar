@@ -11,6 +11,7 @@ Usage:
   python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
   python3 src/jxe2jar.py input.jxe output.jar --skip-jdk /path/to/rt.jar
   python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
+  python3 src/jxe2jar.py input.jxe output.jar --no-inner-classes
 
 Notes:
  - JDK/JRE classes are skipped by default using src/rt.classes.
@@ -18,6 +19,7 @@ Notes:
  - --skip-classes can add additional classes to skip.
  - --skip-libs skips classes already present in a libs/ JAR directory.
  - --strip-synthetic clears ACC_SYNTHETIC flags for stricter javap output.
+ - InnerClasses attributes are synthesized from naming (`Outer$Inner`) unless disabled.
  - Some JXE images embed non-standard metadata; output is best-effort.
 """
 import argparse
@@ -109,7 +111,12 @@ def _infer_classfile_major(romclass) -> int:
 
 
 def dump_romclass(
-    stream, romclass, strip_synthetic: bool = False
+    stream,
+    romclass,
+    strip_synthetic: bool = False,
+    emit_inner_classes: bool = True,
+    inner_map=None,
+    inner_access_flags=None,
 ) -> tuple[ConstPool, list]:  # pylint: disable=R0914, R0915
     """Dumps romclass."""
     stream.write_raw_bytes(b"\xca\xfe\xba\xbe")
@@ -263,13 +270,66 @@ def dump_romclass(
             }
         )
 
-    const_pool.write(stream)
-
     class_access_flags = romclass.access_flags & CLASS_FLAG_MASK
     if strip_synthetic:
         class_access_flags &= ~0x1000
     if not (class_access_flags & 0x0200):  # ensure ACC_SUPER for normal classes
         class_access_flags |= 0x0020
+
+    class_attributes = []
+    if emit_inner_classes:
+        entries = []
+        seen = set()
+
+        def _add_inner_entry(inner_class, outer_class, inner_name):
+            if inner_class in seen:
+                return
+            seen.add(inner_class)
+            inner_class_info_index = const_pool.add(CONST.CLASS, inner_class)
+            outer_class_info_index = (
+                const_pool.add(CONST.CLASS, outer_class) if outer_class else 0
+            )
+            if inner_name is None or inner_name.isdigit():
+                inner_name_index = 0
+            else:
+                inner_name_index = const_pool.add(CONST.UTF8, inner_name)
+            inner_flags = class_access_flags & ~0x0020
+            if inner_access_flags and inner_class in inner_access_flags:
+                inner_flags = inner_access_flags[inner_class] & ~0x0020
+            entries.append(
+                (
+                    inner_class_info_index,
+                    outer_class_info_index,
+                    inner_name_index,
+                    inner_flags & 0xFFFF,
+                )
+            )
+
+        if "$" in romclass.class_name:
+            outer_name, inner_part = romclass.class_name.rsplit("$", 1)
+            if outer_name:
+                _add_inner_entry(romclass.class_name, outer_name, inner_part)
+
+        if inner_map and romclass.class_name in inner_map:
+            for child in inner_map[romclass.class_name]:
+                if "$" in child:
+                    _, inner_part = child.rsplit("$", 1)
+                else:
+                    inner_part = None
+                _add_inner_entry(child, romclass.class_name, inner_part)
+
+        if entries:
+            inner_attr_name_index = const_pool.add(CONST.UTF8, "InnerClasses")
+            class_attributes.append(
+                {
+                    "attribute_name_index": inner_attr_name_index,
+                    "attribute_length": 2 + 8 * len(entries),
+                    "number_of_classes": len(entries),
+                    "classes": entries,
+                }
+            )
+
+    const_pool.write(stream)
 
     stream.write_u16(class_access_flags)
     stream.write_u16(class_name_id)
@@ -316,18 +376,41 @@ def dump_romclass(
             if attribute["attributes_count"]:
                 raise NotImplementedError()
 
-    stream.write_u16(0)
+    stream.write_u16(len(class_attributes))
+    for attr in class_attributes:
+        stream.write_u16(attr["attribute_name_index"])
+        stream.write_u32(attr["attribute_length"])
+        stream.write_u16(attr["number_of_classes"])
+        for entry in attr["classes"]:
+            stream.write_u16(entry[0])
+            stream.write_u16(entry[1])
+            stream.write_u16(entry[2])
+            stream.write_u16(entry[3])
 
     return method_info_list, const_pool
 
 
-def create_class(romclass, jarfile, strip_synthetic: bool = False) -> None:
+def create_class(
+    romclass,
+    jarfile,
+    strip_synthetic: bool = False,
+    emit_inner_classes: bool = True,
+    inner_map=None,
+    inner_access_flags=None,
+) -> None:
     """Creates class"""
     class_name = romclass.class_name
     class_file = f"{class_name}.class"
     f_stream = io.BytesIO()
     stream = WriterStream(f_stream)
-    res = dump_romclass(stream, romclass, strip_synthetic=strip_synthetic)
+    res = dump_romclass(
+        stream,
+        romclass,
+        strip_synthetic=strip_synthetic,
+        emit_inner_classes=emit_inner_classes,
+        inner_map=inner_map,
+        inner_access_flags=inner_access_flags,
+    )
     stream.write()
     jarfile.writestr(class_file, f_stream.getvalue())
     return res
@@ -415,7 +498,21 @@ def _create_jar(
     jxe,
     skip_classes=None,
     strip_synthetic=False,
+    emit_inner_classes=True,
 ):
+    inner_map = {}
+    inner_access_flags = {}
+    if emit_inner_classes:
+        for rc in jxe.image.classes:
+            flags = rc.access_flags & CLASS_FLAG_MASK
+            if strip_synthetic:
+                flags &= ~0x1000
+            inner_access_flags[rc.class_name] = flags
+            if "$" in rc.class_name:
+                outer, _ = rc.class_name.rsplit("$", 1)
+                if outer:
+                    inner_map.setdefault(outer, []).append(rc.class_name)
+
     with zipfile.ZipFile(jar_name, "w") as jar_zipfile:
         total = len(jxe.image.classes)
         skipped = 0
@@ -429,7 +526,14 @@ def _create_jar(
 
             print(f"[{idx}/{total}] {romclass.class_name}")
             try:
-                create_class(romclass, jar_zipfile, strip_synthetic=strip_synthetic)
+                create_class(
+                    romclass,
+                    jar_zipfile,
+                    strip_synthetic=strip_synthetic,
+                    emit_inner_classes=emit_inner_classes,
+                    inner_map=inner_map,
+                    inner_access_flags=inner_access_flags,
+                )
                 written += 1
             except Exception as exc:  # pylint: disable=W0718
                 print("bad class, skip", romclass.class_name, ": ", exc)
@@ -448,6 +552,7 @@ Examples:
   %(prog)s input.jxe output.jar --skip-jdk /path/to/rt.jar
   %(prog)s input.jxe output.jar --skip-classes path/to/rt.classes
   %(prog)s input.jxe output.jar --strip-synthetic
+  %(prog)s input.jxe output.jar --no-inner-classes
         """)
 
     parser.add_argument('jxe_file', help='Input JXE file')
@@ -460,6 +565,8 @@ Examples:
                         help='Skip classes listed in a JAR/JMOD/list file or directory')
     parser.add_argument('--strip-synthetic', action='store_true',
                         help='Clear ACC_SYNTHETIC flags on classes/methods/fields')
+    parser.add_argument('--no-inner-classes', action='store_true',
+                        help='Disable synthesizing InnerClasses attributes')
 
     args = parser.parse_args()
 
@@ -491,6 +598,7 @@ Examples:
             jxe,
             skip_classes=skip_classes if skip_classes else None,
             strip_synthetic=args.strip_synthetic,
+            emit_inner_classes=not args.no_inner_classes,
         )
 
 

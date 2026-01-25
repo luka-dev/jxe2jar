@@ -20,6 +20,7 @@ python3 src/jxe2jar.py input.jxe output.jar
 python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
 python3 src/jxe2jar.py input.jxe output.jar --skip-jdk /path/to/rt.jar
 python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
+python3 src/jxe2jar.py input.jxe output.jar --no-inner-classes
 ```
 
 ## Flags
@@ -31,6 +32,7 @@ python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
 | `--skip-classes PATH` | Add classes from a JAR/JMOD/list file (or a directory of JARs) |
 | `--skip-libs DIR` | Skip classes present in JARs under `DIR` |
 | `--strip-synthetic` | Clear `ACC_SYNTHETIC` on classes/methods/fields (for strict javap) |
+| `--no-inner-classes` | Disable synthesized InnerClasses attributes |
 
 ## Key Logic and Format Knowledge
 
