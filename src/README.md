@@ -41,7 +41,7 @@ Key logic and format knowledge
   - J9 return opcodes mapped to standard returns.
 
 Output classfile notes
-- Classfile version is clamped into a JVM‑friendly range (45..52) for tooling.
+- Classfile version is inferred from flags/opcodes with a minimum of 45 (no upper cap).
 - ACC_SUPER is enforced for non‑interfaces.
 - ACC_SYNTHETIC is preserved unless `--strip-synthetic` is used.
 

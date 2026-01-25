@@ -2,7 +2,7 @@
 
 This script parses a JXE image and reconstructs .class files that are
 compatible with common JVM tooling. It performs a small set of fixups:
- - Clamps classfile versions into a JVM-friendly range.
+ - Infers a minimal classfile version from flags/opcodes (min 45, no upper cap).
  - Rewrites J9-specific bytecode patterns to standard JVM bytecode.
  - Rebuilds constant pool entries (including ConstantValue where possible).
 
@@ -69,16 +69,46 @@ METHOD_FLAG_MASK = (
 )
 
 
+def _infer_classfile_major(romclass) -> int:
+    """Infer the minimal classfile major version required by class features."""
+    # CDC/J9 targets old classfiles; start from Java 1.1 baseline (45).
+    required = 45
+
+    # Class-level flags that require Java 5+.
+    if romclass.access_flags & (0x2000 | 0x4000):  # annotation/enum
+        required = max(required, 49)
+
+    # Module flag would require Java 9+, but we clamp to 52 below.
+    if romclass.access_flags & 0x8000:
+        required = max(required, 53)
+
+    for field in romclass.fields:
+        if field.access_flag & 0x4000:  # enum
+            required = max(required, 49)
+
+    for method in romclass.methods:
+        # strictfp exists since Java 1.2
+        if method.modifier & 0x0800:
+            required = max(required, 46)
+        # bridge/varargs require Java 5+
+        if method.modifier & (0x0040 | 0x0080):
+            required = max(required, 49)
+        # invokedynamic requires Java 7+ (opcode 0xBA)
+        if method.bytecode and 0xBA in method.bytecode:
+            required = max(required, 51)
+
+    # Keep at least 45; allow higher versions when required by flags/opcodes.
+    return max(required, 45)
+
+
 def dump_romclass(
     stream, romclass, strip_synthetic: bool = False
 ) -> tuple[ConstPool, list]:  # pylint: disable=R0914, R0915
     """Dumps romclass."""
     stream.write_raw_bytes(b"\xca\xfe\xba\xbe")
-    # Many ROM classes carry IBM/J9 specific version numbers that don't map
-    # cleanly to HotSpot classfile versions. Clamp them into a sane JVM range
-    # to keep downstream tools (javap/decompilers) happy.
+    # Infer the minimal classfile version required by flags/opcodes.
     target_minor = 0
-    target_major = min(max(romclass.major, 45), 52)
+    target_major = _infer_classfile_major(romclass)
     stream.write_u16(target_minor)
     stream.write_u16(target_major)
     const_pool = ConstPool(romclass)
