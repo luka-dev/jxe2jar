@@ -267,12 +267,21 @@ def _method_arg_slots(descriptor: str) -> int:
 
 
 def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
-    """Transforms bytecode"""
+    """Transforms bytecode and returns (new_bytecode, offset_map)."""
     i = 0
     new_cp_transform = {}
     new_bytecode = bytearray()
+    offset_map = {}
+    fixups = []
+
+    def _pack_s16(value):
+        return struct.pack(">h", value)
+
+    def _pack_s32(value):
+        return struct.pack(">i", value)
 
     while i < len(bytecode):
+        offset_map[i] = len(new_bytecode)
         opcode = bytecode[i]
         if opcode in (
             JBOpcode.JBgetstatic,
@@ -320,6 +329,11 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             index = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
             if index == 0xFFFF:
                 break
+            cp_len = None
+            if getattr(cp, "romclass", None) is not None:
+                cp_len = len(cp.romclass.constant_pool)
+            if cp_len is not None and index == cp_len and index > 0:
+                index -= 1
             new_bytecode.append(JBOpcode.JBldc2lw)
             if cp.check_transform(index, b"\x06"):
                 transform = cp.get_transform(index)
@@ -333,13 +347,17 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
                     new_index = transform["new_index"]
                     new_index = cp.add(CONST.LONG, (0, cp.get_int(new_index))) - 1
                 else:
-                    where = ""
-                    if owner and method_name:
-                        where = f" in {owner}.{method_name}{signature}"
-                    print(f"WARNING: ldc2_w fallback{where} (cp={index})")
-                    # TODO: very dirty hack, because we incorrectly
-                    # parse constant pool used in 1 case
-                    new_index = 0
+                    raw_long = cp.get_raw_long(index)
+                    if raw_long is not None:
+                        new_index = cp.add(CONST.LONG, raw_long) - 1
+                    else:
+                        where = ""
+                        if owner and method_name:
+                            where = f" in {owner}.{method_name}{signature}"
+                        print(f"WARNING: ldc2_w fallback{where} (cp={index})")
+                        # TODO: very dirty hack, because we incorrectly
+                        # parse constant pool used in 1 case
+                        new_index = 0
                 tmp = struct.pack(">H", new_index + 1)
                 new_bytecode += tmp
             i += 3
@@ -350,6 +368,11 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             index = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
             if index == 0xFFFF:
                 break
+            cp_len = None
+            if getattr(cp, "romclass", None) is not None:
+                cp_len = len(cp.romclass.constant_pool)
+            if cp_len is not None and index == cp_len and index > 0:
+                index -= 1
             transform = cp.transform.get(index)
             if not transform:
                 break
@@ -421,11 +444,15 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             JBOpcode.JBifnonnull,
         ):
             new_bytecode.append(opcode)
-            index = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
-            tmp = struct.pack(">H", index)
-            new_bytecode += tmp
+            if i + 3 > len(bytecode):
+                break
+            rel = struct.unpack("<h", bytecode[i + 1 : i + 3])[0]
+            target = i + rel
+            fixups.append((len(new_bytecode), target, 2, i))
+            new_bytecode += b"\x00\x00"
             i += 3
         elif opcode in (JBOpcode.JBaload0getfield,):
+            # J9 prefix for implicit aload_0 before a field access.
             new_bytecode.append(JBOpcode.JBaload0)
             i += 1
         elif opcode in (JBOpcode.JBreturn0, JBOpcode.JBsyncReturn0, JBOpcode.JBreturnFromConstructor):
@@ -535,18 +562,19 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             new_bytecode.append(bytecode[i + 2])
             i += 3
         elif opcode in (JBOpcode.JBtableswitch,):
+            origin = i
             new_bytecode.append(opcode)
             in_padding = (i + 1) % 4
             in_padding = in_padding if in_padding == 0 else (4 - in_padding)
             out_padding = len(new_bytecode) % 4
             out_padding = out_padding if out_padding == 0 else (4 - out_padding)
-            for _ in range(out_padding):
-                new_bytecode.append(0x0)
+            new_bytecode.extend(b"\x00" * out_padding)
             i += 1 + in_padding
             if i + 12 > len(bytecode):
                 break
-            default = struct.unpack("<I", bytecode[i : i + 4])[0]
-            new_bytecode += struct.pack(">I", default)
+            default = struct.unpack("<i", bytecode[i : i + 4])[0]
+            fixups.append((len(new_bytecode), origin + default, 4, origin))
+            new_bytecode += b"\x00\x00\x00\x00"
             i += 4
             low = struct.unpack("<i", bytecode[i : i + 4])[0]
             new_bytecode += struct.pack(">i", low)
@@ -557,34 +585,37 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             for _ in range(high - low + 1):
                 if i + 4 > len(bytecode):
                     break
-                jump = struct.unpack("<I", bytecode[i : i + 4])[0]
-                new_bytecode += struct.pack(">I", jump)
+                jump = struct.unpack("<i", bytecode[i : i + 4])[0]
+                fixups.append((len(new_bytecode), origin + jump, 4, origin))
+                new_bytecode += b"\x00\x00\x00\x00"
                 i += 4
         elif opcode in (JBOpcode.JBlookupswitch,):
+            origin = i
             new_bytecode.append(opcode)
             in_padding = (i + 1) % 4
             in_padding = in_padding if in_padding == 0 else (4 - in_padding)
             out_padding = len(new_bytecode) % 4
             out_padding = out_padding if out_padding == 0 else (4 - out_padding)
-            for _ in range(out_padding):
-                new_bytecode.append(0x0)
+            new_bytecode.extend(b"\x00" * out_padding)
             i += 1 + in_padding
             if i + 8 > len(bytecode):
                 break
-            default = struct.unpack("<I", bytecode[i : i + 4])[0]
-            new_bytecode += struct.pack(">I", default)
+            default = struct.unpack("<i", bytecode[i : i + 4])[0]
+            fixups.append((len(new_bytecode), origin + default, 4, origin))
+            new_bytecode += b"\x00\x00\x00\x00"
             i += 4
-            n = struct.unpack("<I", bytecode[i : i + 4])[0]
-            new_bytecode += struct.pack(">I", n)
+            n = struct.unpack("<i", bytecode[i : i + 4])[0]
+            new_bytecode += struct.pack(">i", n)
             i += 4
             for _ in range(n):
                 if i + 8 > len(bytecode):
                     break
-                match = struct.unpack("<I", bytecode[i : i + 4])[0]
-                new_bytecode += struct.pack(">I", match)
+                match = struct.unpack("<i", bytecode[i : i + 4])[0]
+                new_bytecode += struct.pack(">i", match)
                 i += 4
-                jump = struct.unpack("<I", bytecode[i : i + 4])[0]
-                new_bytecode += struct.pack(">I", jump)
+                jump = struct.unpack("<i", bytecode[i : i + 4])[0]
+                fixups.append((len(new_bytecode), origin + jump, 4, origin))
+                new_bytecode += b"\x00\x00\x00\x00"
                 i += 4
         elif opcode in (JBOpcode.JBmultianewarray,):
             new_bytecode.append(opcode)
@@ -605,15 +636,27 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             new_bytecode.append(opcode)
             if i + 5 > len(bytecode):
                 break
-            value = struct.unpack("<I", bytecode[i + 1 : i + 5])[0]
-            tmp = struct.pack(">I", value)
-            new_bytecode += tmp
+            rel = struct.unpack("<i", bytecode[i + 1 : i + 5])[0]
+            target = i + rel
+            fixups.append((len(new_bytecode), target, 4, i))
+            new_bytecode += b"\x00\x00\x00\x00"
             i += 5
         else:
             new_bytecode.append(opcode)
             i += 1
 
+    offset_map[len(bytecode)] = len(new_bytecode)
+
+    for pos, target, size, origin in fixups:
+        if target not in offset_map:
+            continue
+        new_rel = offset_map[target] - offset_map[origin]
+        if size == 2:
+            new_bytecode[pos : pos + 2] = _pack_s16(new_rel)
+        else:
+            new_bytecode[pos : pos + 4] = _pack_s32(new_rel)
+
     for index, value in new_cp_transform.items():
         cp.apply_transform(index, value)
 
-    return new_bytecode
+    return new_bytecode, offset_map

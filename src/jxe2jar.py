@@ -77,6 +77,8 @@ def _infer_classfile_major(romclass) -> int:
     # Class-level flags that require Java 5+.
     if romclass.access_flags & (0x2000 | 0x4000):  # annotation/enum
         required = max(required, 49)
+    if romclass.access_flags & 0x1000:  # synthetic
+        required = max(required, 49)
 
     # Module flag would require Java 9+, but we clamp to 52 below.
     if romclass.access_flags & 0x8000:
@@ -85,6 +87,8 @@ def _infer_classfile_major(romclass) -> int:
     for field in romclass.fields:
         if field.access_flag & 0x4000:  # enum
             required = max(required, 49)
+        if field.access_flag & 0x1000:  # synthetic
+            required = max(required, 49)
 
     for method in romclass.methods:
         # strictfp exists since Java 1.2
@@ -92,6 +96,8 @@ def _infer_classfile_major(romclass) -> int:
             required = max(required, 46)
         # bridge/varargs require Java 5+
         if method.modifier & (0x0040 | 0x0080):
+            required = max(required, 49)
+        if method.modifier & 0x1000:
             required = max(required, 49)
         # invokedynamic requires Java 7+ (opcode 0xBA)
         if method.bytecode and 0xBA in method.bytecode:
@@ -196,19 +202,30 @@ def dump_romclass(
         if strip_synthetic:
             method_flags &= ~0x1000
         has_code = not (method_flags & (0x0100 | 0x0400))  # native or abstract
-        bytecode = (
-            transform_bytecode(
+        if has_code:
+            bytecode, offset_map = transform_bytecode(
                 bytearray(method.bytecode),
                 method.signature,
                 const_pool,
                 owner=romclass.class_name,
                 method_name=method.name,
             )
-            if has_code
-            else b""
-        )
+        else:
+            bytecode = b""
+            offset_map = {}
         attributes = []
         if has_code:
+            def _map_offset(value: int) -> int:
+                if value in offset_map:
+                    return offset_map[value]
+                if value >= len(method.bytecode):
+                    return len(bytecode)
+                # Fallback: find the nearest prior offset
+                for back in range(value - 1, -1, -1):
+                    if back in offset_map:
+                        return offset_map[back]
+                return 0
+
             attributes.append(
                 {
                     "attribute_name_index": code_attr_name_index,
@@ -222,9 +239,9 @@ def dump_romclass(
                     "exception_table_length": len(method.catch_exceptions),
                     "exception_table": [
                         (
-                            exception.start,
-                            exception.end,
-                            exception.handler,
+                            _map_offset(exception.start),
+                            _map_offset(exception.end),
+                            _map_offset(exception.handler),
                             exception.catch_type + 1
                             if exception.catch_type > 0
                             else 0,

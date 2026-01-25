@@ -229,9 +229,10 @@ class J9ROMMethod:
             if use_bytecodesize_high:
                 bytecode_size += bytecode_size_high << 16
             bytecode_size *= 4
-            if modifier & 0x02000000:
-                bytecode_size += 4
             bytecode = stream.read_bytes(bytecode_size)
+            if modifier & 0x02000000:
+                # J9 stores an extra u32 after bytecode for some methods.
+                stream.read_bytes(4)
             stream.set((stream.get() + 3) & ~3)
             if has_exception_info:
                 caught_exception_count = stream.read_u16()
@@ -280,8 +281,21 @@ class J9ROMInterface:
 class J9ROMConstant:
     """J9 Constant."""
 
-    def __init__(self, cons_type, value=None, _class=None, name=None, descriptor=None):
+    def __init__(
+        self,
+        cons_type,
+        value=None,
+        _class=None,
+        name=None,
+        descriptor=None,
+        raw_value=None,
+        raw_type=None,
+        rom_pos=None,
+    ):
         self.type = cons_type
+        self.raw_value = raw_value
+        self.raw_type = raw_type
+        self.rom_pos = rom_pos
         match cons_type:
             case ConstType.INT | ConstType.STRING | ConstType.LONG:
                 self.value = value
@@ -298,6 +312,8 @@ class J9ROMConstant:
         pos = stream.get()
         value = stream.read_u32()
         value_type = stream.read_u32()
+        raw_value = value
+        raw_type = value_type
 
         match value_type:
             case ConstType.STRING | ConstType.CLASS:
@@ -312,13 +328,25 @@ class J9ROMConstant:
                 if class_count is not None and value >= class_count:
                     value = struct.pack("<II", value, value_type)
                     value_type = ConstType.LONG
-                    return J9ROMConstant(value_type, value=value)
+                    return J9ROMConstant(
+                        value_type,
+                        value=value,
+                        raw_value=raw_value,
+                        raw_type=raw_type,
+                        rom_pos=pos,
+                    )
 
                 class_ptr = base + 8 * value
                 if class_ptr < 0 or class_ptr + 4 > stream_len:
                     value = struct.pack("<II", value, value_type)
                     value_type = ConstType.LONG
-                    return J9ROMConstant(value_type, value=value)
+                    return J9ROMConstant(
+                        value_type,
+                        value=value,
+                        raw_value=raw_value,
+                        raw_type=raw_type,
+                        rom_pos=pos,
+                    )
                 try:
                     with StreamCursor(stream, class_ptr):
                         _class = stream.read_string_ref()
@@ -330,16 +358,36 @@ class J9ROMConstant:
                     with StreamCursor(stream, ptr):
                         name = stream.read_string_ref()
                         descriptor = stream.read_string_ref()
-                    if not name or not _is_descriptor(descriptor):
-                        raise ValueError("invalid ref descriptor")
+                    if not name:
+                        raise ValueError("invalid ref name")
+                    if descriptor:
+                        descriptor = descriptor.rstrip("\x00")
+                    if not _is_descriptor(descriptor):
+                        cleaned = descriptor.split("\x00", 1)[0] if descriptor else ""
+                        if _is_descriptor(cleaned):
+                            descriptor = cleaned
+                        elif not descriptor:
+                            raise ValueError("invalid ref descriptor")
                     return J9ROMConstant(
-                        ConstType.REF, _class=_class, name=name, descriptor=descriptor
+                        ConstType.REF,
+                        _class=_class,
+                        name=name,
+                        descriptor=descriptor,
+                        raw_value=raw_value,
+                        raw_type=raw_type,
+                        rom_pos=pos,
                     )
                 except Exception:
                     value = struct.pack("<II", value, value_type)
                     value_type = 3
 
-        return J9ROMConstant(value_type, value=value)
+        return J9ROMConstant(
+            value_type,
+            value=value,
+            raw_value=raw_value,
+            raw_type=raw_type,
+            rom_pos=pos,
+        )
 
 
 class J9ROMClass:
@@ -356,6 +404,11 @@ class J9ROMClass:
         methods,
         fields,
         constant_pool,
+        rom_base=None,
+        rom_stream=None,
+        class_count=None,
+        ram_constant_pool_count=None,
+        rom_constant_pool_count=None,
     ):
         self.minor = minor
         self.major = major
@@ -366,6 +419,11 @@ class J9ROMClass:
         self.methods = methods
         self.fields = fields
         self.constant_pool = constant_pool
+        self.rom_base = rom_base
+        self.rom_stream = rom_stream
+        self.class_count = class_count
+        self.ram_constant_pool_count = ram_constant_pool_count
+        self.rom_constant_pool_count = rom_constant_pool_count
 
     @staticmethod
     def read_at(stream: BitArray, class_name: str, class_pointer: int, class_count=None):
@@ -399,7 +457,7 @@ class J9ROMClass:
 
             object_static_count = stream.read_u32()  # noqa: F841
             double_scalar_static_count = stream.read_u32()  # noqa: F841
-            ram_constant_pool_count = stream.read_u32()  # noqa: F841
+            ram_constant_pool_count = stream.read_u32()
             rom_constant_pool_count = stream.read_u32()
             crc = stream.read_u32()  # noqa: F841
             instance_size = stream.read_u32()  # noqa: F841
@@ -453,6 +511,11 @@ class J9ROMClass:
             methods,
             fields,
             constant_pool,
+            rom_base=base,
+            rom_stream=stream,
+            class_count=class_count,
+            ram_constant_pool_count=ram_constant_pool_count,
+            rom_constant_pool_count=rom_constant_pool_count,
         )
 
 
