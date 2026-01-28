@@ -70,6 +70,35 @@ METHOD_FLAG_MASK = (
 )
 
 
+def _method_arg_slots(descriptor: str) -> int:
+    """Return number of local slots for method args (not including receiver)."""
+    if not descriptor or not descriptor.startswith("("):
+        return 0
+    i = 1
+    slots = 0
+    while i < len(descriptor) and descriptor[i] != ")":
+        ch = descriptor[i]
+        if ch == "[":
+            while i < len(descriptor) and descriptor[i] == "[":
+                i += 1
+            if i < len(descriptor) and descriptor[i] == "L":
+                i = descriptor.find(";", i)
+                if i == -1:
+                    return slots
+            slots += 1
+        elif ch == "L":
+            i = descriptor.find(";", i)
+            if i == -1:
+                return slots
+            slots += 1
+        elif ch in ("J", "D"):
+            slots += 2
+        else:
+            slots += 1
+        i += 1
+    return slots
+
+
 def _infer_classfile_major(romclass) -> int:
     """Infer the minimal classfile major version required by class features."""
     # CDC/J9 targets old classfiles; start from Java 1.2 baseline (46).
@@ -216,6 +245,10 @@ def dump_romclass(
             offset_map = {}
         attributes = []
         if has_code:
+            arg_slots = _method_arg_slots(method.signature)
+            if not (method_flags & 0x0008):  # not static
+                arg_slots += 1
+            max_locals = arg_slots + method.temp_count
             def _map_offset(value: int) -> int:
                 if value in offset_map:
                     return offset_map[value]
@@ -234,7 +267,7 @@ def dump_romclass(
                     + len(method.catch_exceptions) * 8
                     + 0xC,
                     "max_stack": method.max_stack,
-                    "max_locals": method.temp_count,
+                    "max_locals": max_locals,
                     "code_length": len(bytecode),
                     "code": bytecode,
                     "exception_table_length": len(method.catch_exceptions),
