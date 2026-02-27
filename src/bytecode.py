@@ -266,6 +266,24 @@ def _method_arg_slots(descriptor: str) -> int:
     return slots
 
 
+def _return_opcode_for_signature(signature: str) -> int:
+    """Infer the standard JVM return opcode from a method descriptor."""
+    if not signature or ")" not in signature:
+        return 0xB1  # void fallback
+    ret = signature[signature.rindex(")") + 1:]
+    if not ret or ret[0] == "V":
+        return 0xB1  # return
+    if ret[0] in "IBZSC":
+        return 0xAC  # ireturn
+    if ret[0] == "J":
+        return 0xAD  # lreturn
+    if ret[0] == "F":
+        return 0xAE  # freturn
+    if ret[0] == "D":
+        return 0xAF  # dreturn
+    return 0xB0  # areturn (L...; or [...;)
+
+
 def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
     """Transforms bytecode and returns (new_bytecode, offset_map)."""
     i = 0
@@ -462,12 +480,12 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             # J9 prefix for implicit aload_0 before a field access.
             new_bytecode.append(JBOpcode.JBaload0)
             i += 1
-        elif opcode in (JBOpcode.JBreturn0, JBOpcode.JBsyncReturn0, JBOpcode.JBreturnFromConstructor):
+        elif opcode in (JBOpcode.JBreturn0, JBOpcode.JBsyncReturn0, JBOpcode.JBreturnFromConstructor, JBOpcode.JBretFromNative0):
             # JBreturn0 -> return (0xb1)
             # Used only if function return void
             new_bytecode.append(0xB1)
             i += 1
-        elif opcode in (JBOpcode.JBreturn1, JBOpcode.JBsyncReturn1):
+        elif opcode in (JBOpcode.JBreturn1, JBOpcode.JBsyncReturn1, JBOpcode.JBretFromNative1):
             # JBreturn1 -> areturn/ireturn/freturn (0xb0)
             # Used only after push on stack
             if signature.endswith(")B") or signature.endswith(")Z") or signature.endswith(")S") or \
@@ -487,6 +505,22 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
                 new_bytecode.append(0xAF)
             else:
                 new_bytecode.append(0xAD)
+            i += 1
+        elif opcode == JBOpcode.JBretFromNativeF:
+            new_bytecode.append(0xAE)  # freturn
+            i += 1
+        elif opcode == JBOpcode.JBretFromNativeD:
+            new_bytecode.append(0xAF)  # dreturn
+            i += 1
+        elif opcode == JBOpcode.JBretFromNativeJ:
+            new_bytecode.append(0xAD)  # lreturn
+            i += 1
+        elif opcode in (JBOpcode.JBgenericReturn, JBOpcode.JBreturnToMicroJIT):
+            # Generic return — infer from full method signature.
+            new_bytecode.append(_return_opcode_for_signature(signature))
+            i += 1
+        elif opcode in (JBOpcode.JBasyncCheck, JBOpcode.JBbreakpoint, JBOpcode.JBimpdep1, JBOpcode.JBimpdep2):
+            new_bytecode.append(0x00)  # nop
             i += 1
         elif opcode in (JBOpcode.JBinvokeinterface2,):
             # JBinvokeinterface2 -> invokeinterface
