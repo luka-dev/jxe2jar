@@ -42,6 +42,13 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
   - `invokeinterface` count is computed from the descriptor.
   - `ldc` is promoted to `ldc_w` when CP index > 255.
   - J9 prefix opcodes are expanded correctly (e.g., implicit `aload_0` prefix).
+  - J9 return opcodes are mapped to standard JVM returns based on method signature:
+    - `JBreturn0` / `JBsyncReturn0` / `JBreturnFromConstructor` / `JBretFromNative0` → `return`
+    - `JBreturn1` / `JBsyncReturn1` / `JBretFromNative1` → `ireturn` / `freturn` / `areturn`
+    - `JBreturn2` / `JBsyncReturn2` → `lreturn` / `dreturn`
+    - `JBretFromNativeF` / `JBretFromNativeD` / `JBretFromNativeJ` → typed returns
+    - `JBgenericReturn` / `JBreturnToMicroJIT` → inferred from descriptor
+  - J9 runtime/debug opcodes (`JBasyncCheck`, `JBbreakpoint`, `JBimpdep1`, `JBimpdep2`) → `nop`
   - Branch and switch offsets are rewritten using output offset maps to avoid `javap` errors.
   - Switch padding uses output offset so alignment is correct.
   - Invalid/missing CP refs are handled defensively instead of crashing.
