@@ -422,8 +422,15 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             tmp = struct.pack(">H", value)
             new_bytecode += tmp
             i += 3
+        elif opcode in (JBOpcode.JBsipush,):
+            # sipush: push a 16-bit signed immediate onto the stack.
+            new_bytecode.append(opcode)
+            if i + 3 > len(bytecode):
+                break
+            value = struct.unpack("<h", bytecode[i + 1 : i + 3])[0]
+            new_bytecode += struct.pack(">h", value)
+            i += 3
         elif opcode in (
-            JBOpcode.JBsipush,
             JBOpcode.JBifeq,
             JBOpcode.JBifne,
             JBOpcode.JBiflt,
