@@ -34,6 +34,7 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
   - Supports INTEGER/FLOAT/LONG/DOUBLE/STRING/REF and preserves descriptors.
   - Encodes UTF-8 with `surrogatepass` to keep odd ROM strings stable.
   - Decodes J9 ROM "LONG" slots into proper field/method refs using ROM base offsets.
+  - **Float constant recovery:** J9 stores both `int` and `float` as `J9CONST.INT` (type 0) — the ROM format has no int/float distinction. A bytecode pre-pass with stack simulation (`_find_float_constants`) walks each method before translation, tracking which `ldc`/`ldc_w` constant pool entries flow into float-consuming operations (`fstore`, `fadd`, `fcmpg`, `putfield` with `F` descriptor, `invoke*` with `F` parameters, etc.). Identified entries are reclassified from `CONST.INTEGER` to `CONST.FLOAT` via `new_cp_transform`. This fixed ~1,200 classes across MU1316-lsd.jxe where values like `100.0f` appeared as `(float)1120403456` in decompiled output.
 
 ### Bytecode Translation
 - **Before:** Basic mapping, missing J9 wide opcodes and invokeinterface handling.

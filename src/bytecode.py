@@ -284,10 +284,453 @@ def _return_opcode_for_signature(signature: str) -> int:
     return 0xB0  # areturn (L...; or [...;)
 
 
+def _j9_instr_size(bytecode, i):
+    """Return byte size of the J9 instruction at position *i*."""
+    if i >= len(bytecode):
+        return 1
+    op = bytecode[i]
+
+    # --- 2-byte opcodes (opcode + 1-byte operand) ---
+    if op in (
+        0x10,  # bipush
+        0x12,  # ldc
+        0x15, 0x16, 0x17, 0x18, 0x19,  # iload..aload
+        0x36, 0x37, 0x38, 0x39, 0x3A,  # istore..astore
+        0xA9,  # ret
+        0xBC,  # newarray
+    ):
+        return 2
+
+    # --- 3-byte opcodes (opcode + 2-byte operand, usually LE) ---
+    if op in (
+        0x11,  # sipush
+        0x13,  # ldc_w
+        0x14,  # ldc2_lw
+        0x84,  # iinc
+        0xB2, 0xB3, 0xB4, 0xB5,  # getstatic..putfield
+        0xB6, 0xB7, 0xB8, 0xB9,  # invokevirtual..invokeinterface
+        0xBB, 0xBD,  # new, anewarray
+        0xC0, 0xC1,  # checkcast, instanceof
+        0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E,  # ifeq..ifle
+        0x9F, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4,  # if_icmpeq..if_icmple
+        0xA5, 0xA6,  # if_acmpeq, if_acmpne
+        0xA7, 0xA8,  # goto, jsr
+        0xC6, 0xC7,  # ifnull, ifnonnull
+        0xF9,  # ldc2dw (J9)
+        0xCB, 0xCC, 0xCD, 0xCE, 0xCF,  # J9 wide loads
+        0xD0, 0xD1, 0xD2, 0xD3, 0xD4,  # J9 wide stores
+    ):
+        return 3
+
+    # --- 4-byte opcodes ---
+    if op == 0xC5:  # multianewarray
+        return 4
+
+    # --- 5-byte opcodes ---
+    if op in (
+        0xC8,  # goto_w
+        0xD5,  # iincw (J9)
+        0xE7,  # invokeinterface2 (J9): 1 + 2 nop/pad + 2 cp index
+    ):
+        return 5
+
+    # --- variable-length: tableswitch ---
+    if op == 0xAA:
+        pad = (i + 1) % 4
+        pad = pad if pad == 0 else (4 - pad)
+        base = i + 1 + pad
+        if base + 12 > len(bytecode):
+            return len(bytecode) - i
+        low = struct.unpack("<i", bytecode[base + 4 : base + 8])[0]
+        high = struct.unpack("<i", bytecode[base + 8 : base + 12])[0]
+        return 1 + pad + 12 + (high - low + 1) * 4
+
+    # --- variable-length: lookupswitch ---
+    if op == 0xAB:
+        pad = (i + 1) % 4
+        pad = pad if pad == 0 else (4 - pad)
+        base = i + 1 + pad
+        if base + 8 > len(bytecode):
+            return len(bytecode) - i
+        n = struct.unpack("<i", bytecode[base + 4 : base + 8])[0]
+        return 1 + pad + 8 + n * 8
+
+    # Everything else is 1-byte (simple opcodes, J9 1-byte specials).
+    return 1
+
+
+def _parse_param_types(descriptor):
+    """Parse a method descriptor and return a list of single-char type indicators.
+
+    E.g. '(FILjava/lang/String;[BD)V' -> ['F', 'I', 'L', 'L', 'B', 'D']
+    Arrays and objects both return 'L'.
+    """
+    if not descriptor or descriptor[0] != "(":
+        return []
+    result = []
+    i = 1
+    while i < len(descriptor) and descriptor[i] != ")":
+        ch = descriptor[i]
+        if ch == "[":
+            # Array — skip all '[' then the component type
+            while i < len(descriptor) and descriptor[i] == "[":
+                i += 1
+            if i < len(descriptor) and descriptor[i] == "L":
+                i = descriptor.find(";", i)
+                if i == -1:
+                    return result
+            result.append("L")
+        elif ch == "L":
+            i = descriptor.find(";", i)
+            if i == -1:
+                return result
+            result.append("L")
+        elif ch in "BCDFIJSZ":
+            result.append(ch)
+        else:
+            break
+        i += 1
+    return result
+
+
+def _find_float_constants(bytecode, cp, signature):
+    """Identify J9 CP indices that should be FLOAT instead of INTEGER.
+
+    Walks bytecode with a simplified stack simulation.  Stack entries are
+    either a J9 CP index (int, from ldc/ldc_w) or None.  When a
+    float-consuming opcode pops a tracked index, it gets added to the
+    returned set.
+    """
+    float_indices = set()
+    stack = []
+
+    def _mark(entry):
+        if entry is not None:
+            float_indices.add(entry)
+
+    def _pop():
+        return stack.pop() if stack else None
+
+    def _push(v):
+        stack.append(v)
+
+    # Float-consuming opcodes that pop 1 float value
+    FLOAT_POP1 = {
+        0x38,  # fstore
+        0x43, 0x44, 0x45, 0x46,  # fstore_0..fstore_3
+        0x76,  # fneg
+        0x8B, 0x8C, 0x8D,  # f2i, f2l, f2d
+    }
+    # Float-consuming opcodes that pop 2 float values
+    FLOAT_POP2 = {
+        0x62,  # fadd
+        0x66,  # fsub
+        0x6A,  # fmul
+        0x6E,  # fdiv
+        0x72,  # frem
+        0x95, 0x96,  # fcmpl, fcmpg
+    }
+    # J9 wide fstore
+    FLOAT_WIDE_STORE = {0xD2}  # fstorew
+
+    # Branch opcodes (clear stack conservatively)
+    BRANCH_OPS = {
+        0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E,  # ifeq..ifle
+        0x9F, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4,  # if_icmpeq..if_icmple
+        0xA5, 0xA6,  # if_acmpeq, if_acmpne
+        0xA7, 0xA8,  # goto, jsr
+        0xC6, 0xC7,  # ifnull, ifnonnull
+        0xC8,  # goto_w
+        0xAA, 0xAB,  # tableswitch, lookupswitch
+    }
+
+    # Opcodes that push exactly 1 non-CP value
+    PUSH1_OPS = {
+        0x01,  # aconst_null
+        0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,  # iconst_m1..iconst_5
+        0x09, 0x0A,  # lconst_0, lconst_1  (2 slots but we track None)
+        0x0B, 0x0C, 0x0D,  # fconst_0..fconst_2
+        0x0E, 0x0F,  # dconst_0, dconst_1
+        0x10,  # bipush
+        0x11,  # sipush
+        0x15, 0x16, 0x17, 0x18, 0x19,  # iload..aload
+        0x1A, 0x1B, 0x1C, 0x1D,  # iload_0..iload_3
+        0x1E, 0x1F, 0x20, 0x21,  # lload_0..lload_3
+        0x22, 0x23, 0x24, 0x25,  # fload_0..fload_3
+        0x26, 0x27, 0x28, 0x29,  # dload_0..dload_3
+        0x2A, 0x2B, 0x2C, 0x2D,  # aload_0..aload_3
+        0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,  # iaload..saload
+        0xBB,  # new
+        0xBE,  # arraylength
+        0xC0, 0xC1,  # checkcast, instanceof
+        0xB2, 0xB4,  # getstatic, getfield
+        0xCB, 0xCC, 0xCD, 0xCE, 0xCF,  # J9 wide loads
+    }
+
+    # Return-1 opcodes (J9) — pop 1 value, mark as float if sig says F
+    RETURN1_OPS = {0xAD, 0xB0, 0xF5}  # JBreturn1, JBsyncReturn1, JBretFromNative1
+
+    i = 0
+    while i < len(bytecode):
+        op = bytecode[i]
+        size = _j9_instr_size(bytecode, i)
+
+        # --- ldc: push tracked CP index ---
+        if op == 0x12:  # ldc (1-byte index)
+            idx = bytecode[i + 1] if i + 1 < len(bytecode) else None
+            _push(idx)
+
+        elif op == 0x13:  # ldc_w (2-byte LE index)
+            if i + 3 <= len(bytecode):
+                idx = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
+                _push(idx)
+            else:
+                _push(None)
+
+        # --- float-consuming: pop 1 ---
+        elif op in FLOAT_POP1:
+            _mark(_pop())
+            if op == 0x76:  # fneg: push result back
+                _push(None)
+            elif op in (0x8B, 0x8C, 0x8D):  # f2i, f2l, f2d: push converted
+                _push(None)
+
+        # --- float-consuming: pop 2 ---
+        elif op in FLOAT_POP2:
+            _mark(_pop())
+            _mark(_pop())
+            _push(None)  # result (None since it's a computed value)
+
+        # --- fastore: pop value(float), index, arrayref ---
+        elif op == 0x51:  # fastore
+            _mark(_pop())  # value
+            _pop()  # index
+            _pop()  # arrayref
+
+        # --- J9 wide fstore ---
+        elif op in FLOAT_WIDE_STORE:
+            _mark(_pop())
+
+        # --- putfield / putstatic: check descriptor for F ---
+        elif op in (0xB3, 0xB5):  # putstatic, putfield
+            if i + 3 <= len(bytecode):
+                cp_idx = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
+                t = cp.transform.get(cp_idx)
+                desc = t.get("descriptor", "") if t else ""
+                if desc and desc[0] == "F":
+                    _mark(_pop())
+                else:
+                    _pop()
+                if op == 0xB5:  # putfield also pops objectref
+                    _pop()
+            else:
+                stack.clear()
+
+        # --- invoke*: check descriptor params for F ---
+        elif op in (0xB6, 0xB7, 0xB8, 0xB9, 0xE7):
+            if op == 0xE7:  # invokeinterface2: CP index at i+3
+                cp_offset = 3
+            else:
+                cp_offset = 1
+            if i + cp_offset + 2 <= len(bytecode):
+                cp_idx = struct.unpack("<H", bytecode[i + cp_offset : i + cp_offset + 2])[0]
+                t = cp.transform.get(cp_idx)
+                desc = t.get("descriptor", "") if t else ""
+                param_types = _parse_param_types(desc)
+                # Total argument slots (including wide types)
+                total_slots = 0
+                for pt in param_types:
+                    total_slots += 2 if pt in ("J", "D") else 1
+                # Has receiver? (instance methods)
+                has_receiver = op in (0xB6, 0xB7, 0xB9, 0xE7)
+                total_pop = total_slots + (1 if has_receiver else 0)
+                # Pop arguments from stack and check float params
+                # Arguments are pushed left-to-right, so last param is TOS.
+                # We pop in reverse param order.
+                args = []
+                for _ in range(total_slots):
+                    args.append(_pop())
+                if has_receiver:
+                    _pop()  # objectref
+                # Now args[0] = TOS = last param slot
+                # Walk param_types in reverse to match stack positions
+                slot = 0
+                for pt in reversed(param_types):
+                    if pt in ("J", "D"):
+                        slot += 2
+                    else:
+                        if pt == "F" and slot < len(args):
+                            _mark(args[slot])
+                        slot += 1
+                # Push return value if not void
+                if desc and ")" in desc:
+                    ret = desc[desc.rindex(")") + 1:]
+                    if ret and ret[0] != "V":
+                        _push(None)
+            else:
+                stack.clear()
+
+        # --- J9 return1: mark as float if method returns F ---
+        elif op in RETURN1_OPS:
+            if signature and signature.endswith(")F"):
+                _mark(_pop())
+            else:
+                _pop()
+
+        # --- JBretFromNativeF (0xF6): always float return ---
+        elif op == 0xF6:
+            _mark(_pop())
+
+        # --- dup: duplicate TOS ---
+        elif op == 0x59:  # dup
+            v = _pop()
+            _push(v)
+            _push(v)
+
+        # --- swap: swap top two ---
+        elif op == 0x5F:  # swap
+            a = _pop()
+            b = _pop()
+            _push(a)
+            _push(b)
+
+        # --- pop ---
+        elif op == 0x57:  # pop
+            _pop()
+        elif op == 0x58:  # pop2
+            _pop()
+            _pop()
+
+        # --- dup_x1: ..., b, a -> ..., a, b, a ---
+        elif op == 0x5A:
+            a = _pop()
+            b = _pop()
+            _push(a)
+            _push(b)
+            _push(a)
+
+        # --- dup_x2: ..., c, b, a -> ..., a, c, b, a ---
+        elif op == 0x5B:
+            a = _pop()
+            b = _pop()
+            c = _pop()
+            _push(a)
+            _push(c)
+            _push(b)
+            _push(a)
+
+        # --- dup2: ..., b, a -> ..., b, a, b, a ---
+        elif op == 0x5C:
+            a = _pop()
+            b = _pop()
+            _push(b)
+            _push(a)
+            _push(b)
+            _push(a)
+
+        # --- push 1 None for various opcodes ---
+        elif op in PUSH1_OPS:
+            _push(None)
+
+        # --- aload0getfield (J9): pushes 1 value ---
+        elif op == 0xD7:
+            _push(None)
+
+        # --- ldc2_lw / ldc2dw: push 1 wide value ---
+        elif op in (0x14, 0xF9):
+            _push(None)
+
+        # --- store ops (pop 1) ---
+        elif op in (
+            0x36, 0x37, 0x39, 0x3A,  # istore, lstore, dstore, astore
+            0x3B, 0x3C, 0x3D, 0x3E,  # istore_0..istore_3
+            0x3F, 0x40, 0x41, 0x42,  # lstore_0..lstore_3
+            0x47, 0x48, 0x49, 0x4A,  # dstore_0..dstore_3
+            0x4B, 0x4C, 0x4D, 0x4E,  # astore_0..astore_3
+            0xD0, 0xD1, 0xD3, 0xD4,  # J9 wide stores (not fstorew)
+        ):
+            _pop()
+
+        # --- array stores (pop 3: value, index, arrayref) ---
+        elif op in (0x4F, 0x50, 0x52, 0x53, 0x54, 0x55, 0x56):
+            # iastore, lastore, dastore, aastore, bastore, castore, sastore
+            _pop()
+            _pop()
+            _pop()
+
+        # --- binary int/long ops (pop 2, push 1) ---
+        elif op in (
+            0x60, 0x61, 0x63,  # iadd, ladd, dadd
+            0x64, 0x65, 0x67,  # isub, lsub, dsub
+            0x68, 0x69, 0x6B,  # imul, lmul, dmul
+            0x6C, 0x6D, 0x6F,  # idiv, ldiv, ddiv
+            0x70, 0x71, 0x73,  # irem, lrem, drem
+            0x78, 0x79,  # ishl, lshl
+            0x7A, 0x7B,  # ishr, lshr
+            0x7C, 0x7D,  # iushr, lushr
+            0x7E, 0x7F,  # iand, land
+            0x80, 0x81,  # ior, lor
+            0x82, 0x83,  # ixor, lxor
+            0x94,  # lcmp
+            0x97, 0x98,  # dcmpl, dcmpg
+        ):
+            _pop()
+            _pop()
+            _push(None)
+
+        # --- unary ops (pop 1, push 1) ---
+        elif op in (
+            0x74, 0x75, 0x77,  # ineg, lneg, dneg
+            0x85, 0x86, 0x87,  # i2l, i2f, i2d
+            0x88, 0x89, 0x8A,  # l2i, l2f, l2d
+            0x8E, 0x8F, 0x90,  # d2i, d2l, d2f
+            0x91, 0x92, 0x93,  # i2b, i2c, i2s
+        ):
+            _pop()
+            _push(None)
+
+        # --- branches: clear stack ---
+        elif op in BRANCH_OPS:
+            stack.clear()
+
+        # --- return / athrow: clear stack ---
+        elif op in (
+            0xAC, 0xAE, 0xAF, 0xB1,  # JBreturn0, JBreturn2, JBsyncReturn0..2
+            0xBF,  # athrow
+            0xE4, 0xE5,  # returnFromConstructor, genericReturn
+            0xF3, 0xF4, 0xF7, 0xF8,  # J9 retFromNative variants
+        ):
+            stack.clear()
+
+        # --- monitorenter/monitorexit: pop 1 ---
+        elif op in (0xC2, 0xC3):
+            _pop()
+
+        # --- iinc / iincw / nop-like: no stack effect ---
+        elif op in (0x84, 0xD5, 0x00, 0xCA, 0xFA, 0xFE, 0xFF):
+            pass
+
+        # --- anything else: clear stack (conservative) ---
+        else:
+            stack.clear()
+
+        i += size
+
+    return float_indices
+
+
 def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
     """Transforms bytecode and returns (new_bytecode, offset_map)."""
     i = 0
     new_cp_transform = {}
+
+    # Pre-pass: identify float constants via stack simulation
+    float_cp_indices = _find_float_constants(bytecode, cp, signature)
+    for j9_idx in float_cp_indices:
+        t = cp.transform.get(j9_idx)
+        if t and t.get("type") == CONST.INTEGER:
+            new_cp_transform[t["new_index"]] = b"\x04"  # FLOAT
+
     new_bytecode = bytearray()
     offset_map = {}
     fixups = []
