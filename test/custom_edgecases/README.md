@@ -40,6 +40,8 @@ This folder contains **edge-case Java 1.2 test classes** used to validate `jar2j
 | `NativeAbstract` + `NativeAbstract$Impl` | Native + abstract method flags |
 | `CastInstanceof` + `CastInstanceof$*` | checkcast/instanceof (incl. arrays) |
 | `StaticFinalNonConst` | Static final values not eligible for ConstantValue |
+| `SipushArgs` | sipush-range values as method args (reproduces the sipush-as-branch bug) |
+| `AllReturnTypes` | Every return type: void/boolean/byte/char/short/int/float/long/double/Object/array + synchronized variants |
 
 ## Build and Use
 
