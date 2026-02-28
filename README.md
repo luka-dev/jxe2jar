@@ -240,8 +240,35 @@ python3 tools/fix_class_literals.py out/MU1316-lsd-vf/ --apply
 # Verbose (show each file)
 python3 tools/fix_class_literals.py out/MU1316-lsd-vf/ --apply -v
 ```
+Works on both CFR and Vineflower output.
 
-Works on both CFR and Vineflower output. Fixes ~2,400 class literals across ~900 files.
+### Post-processing: int2hex.py
+
+Decompilers output all integer constants in decimal. Values that are bitmasks, flags, or bit patterns are more readable in hex (e.g. `6291488` → `0x600020`). The `int2hex.py` script heuristically identifies these and converts them.
+
+Heuristics used (each contributes a score):
+- **Power of 2** — `4194304` → `0x400000`
+- **All-ones mask** — `2147483647` → `0x7FFFFFFF`
+- **Nibble-aligned** — trailing zero nibbles, e.g. `65536` → `0x10000`
+- **Sparse bits** — few bits set in a large value (bitmask pattern)
+- **Dense mask** — most bits set (e.g. `0x3FFFFF`)
+- **Context** — nearby bitwise operators (`&`, `|`, `~`) or hex literals on the same line
+
+```sh
+# Dry-run (report only)
+python3 tools/int2hex.py out/MU1316-lsd-vf/
+
+# Apply in-place
+python3 tools/int2hex.py out/MU1316-lsd-vf/ --apply
+
+# Lower threshold for more aggressive conversion (more false positives)
+python3 tools/int2hex.py out/MU1316-lsd-vf/ --threshold 1.0 --apply
+
+# Export CSV report for manual review
+python3 tools/int2hex.py out/MU1316-lsd-vf/ --report report.csv
+```
+
+Default threshold is 2.0 (conservative — bitmasks, masks, powers of 2). Use `--threshold 1.0` for aggressive conversion of borderline values like config IDs.
 
 ## See Also
 
