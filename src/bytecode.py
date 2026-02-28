@@ -444,7 +444,7 @@ def _find_float_constants(bytecode, cp, signature):
         0xAA, 0xAB,  # tableswitch, lookupswitch
     }
 
-    # Opcodes that push exactly 1 non-CP value
+    # Opcodes that push exactly 1 non-CP value (no pops)
     PUSH1_OPS = {
         0x01,  # aconst_null
         0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,  # iconst_m1..iconst_5
@@ -459,12 +459,22 @@ def _find_float_constants(bytecode, cp, signature):
         0x22, 0x23, 0x24, 0x25,  # fload_0..fload_3
         0x26, 0x27, 0x28, 0x29,  # dload_0..dload_3
         0x2A, 0x2B, 0x2C, 0x2D,  # aload_0..aload_3
-        0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,  # iaload..saload
         0xBB,  # new
-        0xBE,  # arraylength
-        0xC0, 0xC1,  # checkcast, instanceof
-        0xB2, 0xB4,  # getstatic, getfield
+        0xB2,  # getstatic (no pop, just push)
         0xCB, 0xCC, 0xCD, 0xCE, 0xCF,  # J9 wide loads
+    }
+
+    # Opcodes that pop 1, push 1 (net zero, but must pop to keep stack aligned)
+    POP1_PUSH1_OPS = {
+        0xB4,  # getfield (pop objectref, push field value)
+        0xBE,  # arraylength (pop arrayref, push length)
+        0xC0,  # checkcast (pop ref, push ref — type unchanged)
+        0xC1,  # instanceof (pop ref, push int)
+    }
+
+    # Array load ops: pop 2 (index, arrayref), push 1 (value)
+    ARRAY_LOAD_OPS = {
+        0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,  # iaload..saload
     }
 
     # Return-1 opcodes (J9) — pop 1 value, mark as float if sig says F
@@ -630,6 +640,17 @@ def _find_float_constants(bytecode, cp, signature):
 
         # --- push 1 None for various opcodes ---
         elif op in PUSH1_OPS:
+            _push(None)
+
+        # --- pop 1, push 1 (getfield, arraylength, checkcast, instanceof) ---
+        elif op in POP1_PUSH1_OPS:
+            _pop()
+            _push(None)
+
+        # --- array loads: pop 2 (index, arrayref), push 1 (value) ---
+        elif op in ARRAY_LOAD_OPS:
+            _pop()  # index
+            _pop()  # arrayref
             _push(None)
 
         # --- aload0getfield (J9): pushes 1 value ---
