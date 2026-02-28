@@ -30,31 +30,33 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 # Match the full ternary with class$ or array$ fields.
-# Variants:
+# Variants (with or without outer parens, with or without ClassName. prefix on fields):
 #   (class$pkg$Name == null ? (class$pkg$Name = class$("pkg.Name")) : class$pkg$Name)
-#   (class$pkg$Name == null ? (class$pkg$Name = Foo.class$("pkg.Name")) : class$pkg$Name)
+#   (Foo.class$pkg$Name == null ? (Foo.class$pkg$Name = Foo.class$("pkg.Name")) : Foo.class$pkg$Name)
 #   (array$Ljava$lang$Object == null ? (array$Ljava$lang$Object = class$("[Ljava.lang.Object;")) : array$Ljava$lang$Object)
-# Captures group(1) = the string argument to class$(), e.g. "de.audi.app.Foo" or "[Ljava.lang.Object;"
+#   Without outer parens in field initializers:
+#     Foo.class$pkg$Name == null ? (Foo.class$pkg$Name = class$("pkg.Name")) : Foo.class$pkg$Name
+# Captures group(1) = the string argument to class$(), e.g. "de.audi.app.Foo"
 TERNARY_PATTERN = re.compile(
-    r'\(\s*'
+    r'\(?\s*'
+    r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on field ref
     r'(?:class|array)\$[\w$]+\s*==\s*null\s*'
     r'\?\s*\(\s*'
+    r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on assignment
     r'(?:class|array)\$[\w$]+\s*=\s*'
-    r'(?:[\w$]+\s*\.\s*)?'          # optional ClassName. prefix (CFR style)
-    r'class\$\(\s*"([^"]+)"\s*\)'   # class$("fqn") — capture the FQN
+    r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on class$() call
+    r'class\$\(\s*"([^"]+)"\s*\)'       # class$("fqn") — capture the FQN
     r'\s*\)\s*'
-    r':\s*(?:class|array)\$[\w$]+\s*'
-    r'\)',
+    r':\s*(?:[\w$]+\s*\.\s*)?'          # optional ClassName. prefix on else branch
+    r'(?:class|array)\$[\w$]+\s*'
+    r'\)?',
     re.DOTALL
 )
 
-# Simpler variant without outer parens (used in field initializers):
-#   !(class$foo == null ? (class$foo = Foo.class$("pkg.Foo")) : class$foo).desiredAssertionStatus()
-# Already covered by TERNARY_PATTERN since it matches the inner (...) portion.
-
 # Match synthetic fields: static Class class$pkg$Name; or static Class array$Ljava$...;
+# Also matches with visibility modifiers or final
 FIELD_PATTERN = re.compile(
-    r'^\s+static\s+Class\s+(?:class|array)\$[\w$]+\s*;\s*\n',
+    r'^\s+(?:(?:private|protected|public|static|final)\s+)*Class\s+(?:class|array)\$[\w$]+\s*;\s*\n',
     re.MULTILINE
 )
 
