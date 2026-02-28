@@ -91,6 +91,158 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
   - `vms/xp/en_vs_2005_pro_dvd.iso.url`
   - `vms/xp/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso.url`
 
+## Decompiling
+
+**Recommendation:** Use Vineflower for primary analysis — fewer artifacts, cleaner inner class handling, no broken anonymous imports. Keep CFR output alongside for cross-referencing when VF struggles with a method.
+
+### Decompiling with Vineflower
+
+```sh
+java -Xmx20g -jar tools/vineflower-1.11.2.jar \
+  --decompile-generics=true \
+  --decompile-enums=true \
+  --decompile-assert=true \
+  --decompile-finally=true \
+  --decompile-inner=true \
+  --decompile-java4=true \
+  --decompile-switch-expressions=true \
+  --remove-bridge=true \
+  --remove-synthetic=true \
+  --remove-empty-try-catch=true \
+  --remove-getclass=true \
+  --hide-default-constructor=true \
+  --hide-empty-super=true \
+  --override-annotation=true \
+  --inline-simple-lambdas=true \
+  --use-lvt-names=true \
+  --use-method-parameters=true \
+  --boolean-as-int=true \
+  --simplify-stack=true \
+  --incorporate-returns=true \
+  --pattern-matching=true \
+  --ternary-in-if=true \
+  --ensure-synchronized-monitors=true \
+  --ignore-invalid-bytecode=true \
+  --decompiler-comments=true \
+  --dump-bytecode-on-error=true \
+  --variable-renaming=tiny \
+  --rename-parameters=true \
+  --include-runtime=current \
+  --banner="" \
+  --indent-string="    " \
+  --preferred-line-length=120 \
+  --thread-count=14 \
+  -e libs/client-runtime-3.3.0.jar \
+  -e libs/ec.base-3.1.8.jar \
+  -e libs/html-5.0.bv6.jar \
+  -e libs/jquery-1.11.3.bv1.jar \
+  -e libs/jquery-1.11.3.jar \
+  -e libs/org.apache.commons.logging-4.3.1.jar \
+  -e libs/org.apache.xerces-2.9.0.jar \
+  -e libs/org.json-ld-3.1.8.jar \
+  -e libs/org.osgi.framework-1.10.0.jar \
+  -e libs/org.osgi.util.tracker-1.5.4.jar \
+  -e libs/osgi.annotation-8.0.1.jar \
+  -e libs/shared-3.3.0.jar \
+  out/MU1316-lsd.jar out/MU1316-lsd-vf
+```
+
+Key options explained:
+- `--variable-renaming=tiny --rename-parameters=true` — camelCase variable names derived from type (J9 ROM has no debug info / LocalVariableTable)
+- `--decompile-inner --remove-synthetic --remove-bridge` — inline anonymous classes, hide compiler-generated methods
+- `--ignore-invalid-bytecode` — don't crash on J9-converted bytecode edge cases
+- `--indent-string="    " --preferred-line-length=120` — readable formatting
+- `--include-runtime=current` — gives Vineflower access to the host JDK's standard library (`java.lang`, `java.util`, etc.) for resolving `@Override` on standard interfaces like `Runnable`, `Iterator`, `Comparable`
+- `-Xmx20g` — large heap for 30k-class JAR
+
+**External library references (`-e`):**
+Vineflower can only add `@Override` annotations and resolve generics when it knows the parent class/interface. Classes inside the JAR resolve automatically, but SDK/framework classes that were excluded during conversion (via `--skip-libs`) are missing. Adding them back as external references with `-e` gives Vineflower the type information it needs without including them in the output.
+
+Add any JAR that was part of the original runtime classpath:
+```sh
+-e libs/org.osgi.framework-1.10.0.jar   # OSGi interfaces (Activator, BundleContext, etc.)
+-e libs/ec.base-3.1.8.jar               # eSolutions base framework
+-e libs/shared-3.3.0.jar                # shared SDK classes
+-e libs/client-runtime-3.3.0.jar        # client runtime APIs
+# ... etc. — skip -javadoc.jar and -sources.jar, only use compiled JARs
+```
+
+### Decompiling with CFR
+
+```sh
+java -jar tools/cfr-0.152.jar out/MU1316-lsd.jar \
+  --outputdir out/MU1316-lsd-cfr \
+  --silent true \
+  --comments true \
+  --showversion false \
+  --removeboilerplate true \
+  --removeinnerclasssynthetics true \
+  --decodelambdas true \
+  --decodefinally true \
+  --sugarasserts true \
+  --sugarenums true \
+  --sugarboxing true \
+  --decodeenumswitch true \
+  --decodestringswitch true \
+  --arrayiter true \
+  --collectioniter true \
+  --tryresources true \
+  --hidebridgemethods true \
+  --hidelangimports true \
+  --innerclasses true \
+  --removebadgenerics true \
+  --removedeadmethods true \
+  --relinkconst true \
+  --relinkconststring true \
+  --liftconstructorinit true \
+  --override true \
+  --renameillegalidents true \
+  --recover true \
+  --allowcorrecting true \
+  --tidymonitors true \
+  --labelledblocks true \
+  --usenametable true \
+  --eclipse true
+```
+
+Key options explained:
+- `--sugar*` / `--decode*` — recover high-level constructs (enums, asserts, boxing, lambdas, switches, try-with-resources, for-each)
+- `--removeboilerplate --removedeadmethods --removebadgenerics` — clean up compiler artifacts
+- `--hidebridgemethods --removeinnerclasssynthetics` — hide synthetic access methods
+- `--renameillegalidents` — fix identifiers that aren't valid Java (e.g. `$1`)
+- `--recover --allowcorrecting` — best-effort recovery on broken bytecode
+
+### Post-processing: fix_class_literals.py
+
+Java 1.2 code uses a synthetic `class$()` method pattern instead of `Foo.class` literals. Neither CFR nor Vineflower collapses this pattern from J9-converted bytecode, leaving ugly ternaries like:
+
+```java
+(class$de$audi$app$foo$Bar == null
+    ? (class$de$audi$app$foo$Bar = class$("de.audi.app.foo.Bar"))
+    : class$de$audi$app$foo$Bar).getName()
+```
+
+The `fix_class_literals.py` script replaces these with clean `.class` references:
+
+```java
+de.audi.app.foo.Bar.class.getName()
+```
+
+It also removes the leftover synthetic `static Class class$...` fields and `class$()` methods.
+
+```sh
+# Dry-run (report only)
+python3 tools/fix_class_literals.py out/MU1316-lsd-vf/
+
+# Apply in-place
+python3 tools/fix_class_literals.py out/MU1316-lsd-vf/ --apply
+
+# Verbose (show each file)
+python3 tools/fix_class_literals.py out/MU1316-lsd-vf/ --apply -v
+```
+
+Works on both CFR and Vineflower output. Fixes ~2,400 class literals across ~900 files.
+
 ## See Also
 
 - [`src/README.md`](src/README.md) – Format knowledge and implementation details
