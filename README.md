@@ -97,8 +97,20 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
 
 ### Decompiling with Vineflower
 
+Use the wrapper script which sets all options, adds JDK8 rt.jar, and auto-includes `libs/*.jar`:
+
 ```sh
-java -Xmx20g -jar tools/vineflower-1.11.2.jar \
+bash tools/vineflower.sh out/MU1316-lsd.jar                    # output: out/MU1316-lsd-vf/
+bash tools/vineflower.sh out/MIB3G-lsd.jar out/custom-dir      # custom output dir
+```
+
+The script requires `jvms/zulu8.../` JDK8 to be present (for `--include-runtime` and `rt.jar`).
+
+<details>
+<summary>Equivalent manual command</summary>
+
+```sh
+java -Xmx30g -jar tools/vineflower-1.11.2.jar \
   --decompile-generics=true \
   --decompile-enums=true \
   --decompile-assert=true \
@@ -127,45 +139,43 @@ java -Xmx20g -jar tools/vineflower-1.11.2.jar \
   --dump-bytecode-on-error=true \
   --variable-renaming=tiny \
   --rename-parameters=true \
-  --include-runtime=current \
-  --banner="" \
-  --indent-string="    " \
+  "--include-runtime=path/to/jdk8" \
+  "--banner=" \
+  "--indent-string=    " \
   --preferred-line-length=120 \
   --thread-count=14 \
-  -e libs/client-runtime-3.3.0.jar \
-  -e libs/ec.base-3.1.8.jar \
-  -e libs/html-5.0.bv6.jar \
-  -e libs/jquery-1.11.3.bv1.jar \
-  -e libs/jquery-1.11.3.jar \
-  -e libs/org.apache.commons.logging-4.3.1.jar \
-  -e libs/org.apache.xerces-2.9.0.jar \
-  -e libs/org.json-ld-3.1.8.jar \
-  -e libs/org.osgi.framework-1.10.0.jar \
-  -e libs/org.osgi.util.tracker-1.5.4.jar \
-  -e libs/osgi.annotation-8.0.1.jar \
-  -e libs/shared-3.3.0.jar \
+  --old-try-dedup \
+  --verify-merges \
+  --warn-inconsistent-inner-attributes=false \
+  --add-external=path/to/jdk8/jre/lib/rt.jar \
+  --add-external=libs/client-runtime-3.3.0.jar \
+  --add-external=libs/ec.base-3.1.8.jar \
+  --add-external=libs/html-5.0.bv6.jar \
+  --add-external=libs/jquery-1.11.3.bv1.jar \
+  --add-external=libs/jquery-1.11.3.jar \
+  --add-external=libs/org.apache.commons.logging-4.3.1.jar \
+  --add-external=libs/org.apache.xerces-2.9.0.jar \
+  --add-external=libs/org.json-ld-3.1.8.jar \
+  --add-external=libs/org.osgi.framework-1.10.0.jar \
+  --add-external=libs/org.osgi.util.tracker-1.5.4.jar \
+  --add-external=libs/osgi.annotation-8.0.1.jar \
+  --add-external=libs/shared-3.3.0.jar \
   out/MU1316-lsd.jar out/MU1316-lsd-vf
 ```
+
+</details>
 
 Key options explained:
 - `--variable-renaming=tiny --rename-parameters=true` — camelCase variable names derived from type (J9 ROM has no debug info / LocalVariableTable)
 - `--decompile-inner --remove-synthetic --remove-bridge` — inline anonymous classes, hide compiler-generated methods
 - `--ignore-invalid-bytecode` — don't crash on J9-converted bytecode edge cases
 - `--indent-string="    " --preferred-line-length=120` — readable formatting
-- `--include-runtime=current` — gives Vineflower access to the host JDK's standard library (`java.lang`, `java.util`, etc.) for resolving `@Override` on standard interfaces like `Runnable`, `Iterator`, `Comparable`
-- `-Xmx20g` — large heap for 30k-class JAR
+- `--include-runtime=path/to/jdk8` — gives Vineflower access to JDK8's standard library for resolving `@Override` on standard interfaces like `Runnable`, `Iterator`, `Comparable`
+- `-Xmx30g` — large heap for 30k-class JAR
+- `--add-external=path` — use `--add-external=` (not `-e`) when passing via scripts; `-e` only works on the command line
 
-**External library references (`-e`):**
-Vineflower can only add `@Override` annotations and resolve generics when it knows the parent class/interface. Classes inside the JAR resolve automatically, but SDK/framework classes that were excluded during conversion (via `--skip-libs`) are missing. Adding them back as external references with `-e` gives Vineflower the type information it needs without including them in the output.
-
-Add any JAR that was part of the original runtime classpath:
-```sh
--e libs/org.osgi.framework-1.10.0.jar   # OSGi interfaces (Activator, BundleContext, etc.)
--e libs/ec.base-3.1.8.jar               # eSolutions base framework
--e libs/shared-3.3.0.jar                # shared SDK classes
--e libs/client-runtime-3.3.0.jar        # client runtime APIs
-# ... etc. — skip -javadoc.jar and -sources.jar, only use compiled JARs
-```
+**External library references (`--add-external`):**
+Vineflower can only add `@Override` annotations and resolve generics when it knows the parent class/interface. Classes inside the JAR resolve automatically, but SDK/framework classes that were excluded during conversion (via `--skip-libs`) are missing. Adding them back as external references with `--add-external=` gives Vineflower the type information it needs without including them in the output. Skip `-javadoc.jar` and `-sources.jar` — only use compiled JARs.
 
 ### Decompiling with CFR
 

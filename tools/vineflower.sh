@@ -1,7 +1,7 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JAVA_BIN="${VINEFLOWER_JAVA:-java}"
 JDK8_HOME="$ROOT/jvms/zulu8.78.0.19-ca-jdk8.0.412-macosx_aarch64/zulu-8.jdk/Contents/Home"
 RTJAR="$JDK8_HOME/jre/lib/rt.jar"
@@ -15,25 +15,59 @@ if [ ! -f "$RTJAR" ]; then
   exit 1
 fi
 
-LIBS=""
+# All --flag=value options first
+args=(
+  "$JAVA_BIN" -Xmx30g -jar "$ROOT/tools/vineflower-1.11.2.jar"
+  --decompile-generics=true
+  --decompile-enums=true
+  --decompile-assert=true
+  --decompile-finally=true
+  --decompile-inner=true
+  --decompile-java4=true
+  --decompile-switch-expressions=true
+  --remove-bridge=true
+  --remove-synthetic=true
+  --remove-empty-try-catch=true
+  --remove-getclass=true
+  --hide-default-constructor=true
+  --hide-empty-super=true
+  --override-annotation=true
+  --inline-simple-lambdas=true
+  --use-lvt-names=true
+  --use-method-parameters=true
+  --boolean-as-int=true
+  --simplify-stack=true
+  --incorporate-returns=true
+  --pattern-matching=true
+  --ternary-in-if=true
+  --ensure-synchronized-monitors=true
+  --ignore-invalid-bytecode=true
+  --decompiler-comments=true
+  --dump-bytecode-on-error=true
+  --variable-renaming=tiny
+  --rename-parameters=true
+  "--banner="
+  "--indent-string=    "
+  --preferred-line-length=120
+  --thread-count=14
+  --old-try-dedup
+  --verify-merges
+  --warn-inconsistent-inner-attributes=false
+  "--include-runtime=$JDK8_HOME"
+  "--add-external=$RTJAR"
+)
+
+# External libs
 if [ -d "$ROOT/libs" ]; then
   for jar in "$ROOT"/libs/*.jar; do
-    [ -f "$jar" ] && LIBS="$LIBS -e $jar"
+    case "$jar" in *-javadoc.jar|*-sources.jar) continue;; esac
+    [ -f "$jar" ] && args+=("--add-external=$jar")
   done
 fi
 
+# Input and output last
+args+=("$INPUT" "$OUTDIR")
+
 echo "Input:  $INPUT"
 echo "Output: $OUTDIR"
-
-exec "$JAVA_BIN" -Xmx30g -jar "$ROOT/tools/vineflower-1.11.2.jar" \
-  --include-runtime "$JDK8_HOME" \
-  -e "$RTJAR" \
-  --ignore-invalid-bytecode \
-  --old-try-dedup \
-  --verify-merges \
-  --warn-inconsistent-inner-attributes false \
-  --variable-renaming tiny \
-  --rename-parameters \
-  $LIBS \
-  "$INPUT" "$OUTDIR" \
-  2>&1 | tee "$OUTDIR.log"
+"${args[@]}" 2>&1 | tee "$OUTDIR.log"
