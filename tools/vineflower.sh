@@ -51,7 +51,6 @@ args=(
   --preferred-line-length=120
   --thread-count=14
   --old-try-dedup
-  --verify-merges
   --warn-inconsistent-inner-attributes=false
   "--include-runtime=$JDK8_HOME"
   "--add-external=$RTJAR"
