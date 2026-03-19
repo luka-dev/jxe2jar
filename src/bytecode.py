@@ -855,13 +855,37 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
                 cp_len = len(cp.romclass.constant_pool)
             if cp_len is not None and index == cp_len and index > 0:
                 index -= 1
-            transform = cp.transform.get(index)
-            if not transform:
-                break
-            new_index = transform["new_index"]
-            tmp = struct.pack(">H", new_index + 1)
-            new_cp_transform[new_index] = b"\x06"
-            new_bytecode += tmp
+            if cp.check_transform(index, b"\x06"):
+                # Already DOUBLE (8 bytes + phantom) — just keep it.
+                transform = cp.get_transform(index)
+                new_index = transform["new_index"]
+                tmp = struct.pack(">H", new_index + 1)
+                new_bytecode += tmp
+            elif cp.check_transform(index, b"\x03"):
+                # INTEGER (4 bytes, no phantom) — create proper DOUBLE entry.
+                transform = cp.get_transform(index)
+                old_index = transform["new_index"]
+                raw = cp.get_int(old_index)
+                new_index = cp.add(CONST.DOUBLE, (raw, 0)) - 1
+                tmp = struct.pack(">H", new_index + 1)
+                new_bytecode += tmp
+            else:
+                raw_long = cp.get_raw_long(index)
+                if raw_long is not None:
+                    new_index = cp.add(CONST.DOUBLE, raw_long) - 1
+                else:
+                    transform = cp.transform.get(index)
+                    if transform:
+                        new_index = transform["new_index"]
+                        new_cp_transform[new_index] = b"\x06"
+                    else:
+                        where = ""
+                        if owner and method_name:
+                            where = f" in {owner}.{method_name}{signature}"
+                        print(f"WARNING: ldc2_dw fallback{where} (cp={index})")
+                        new_index = 0
+                tmp = struct.pack(">H", new_index + 1)
+                new_bytecode += tmp
             i += 3
         elif opcode in (JBOpcode.JBiincw,):
             # Convert J9 wide iinc to standard wide form.
