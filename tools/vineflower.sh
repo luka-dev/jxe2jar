@@ -21,7 +21,9 @@ set -- "$JAVA_BIN" -Xmx30g -jar "$ROOT/tools/vineflower-1.11.2.jar" \
   --ignore-invalid-bytecode \
   --old-try-dedup \
   --verify-merges \
-  --warn-inconsistent-inner-attributes=false
+  --warn-inconsistent-inner-attributes=false \
+  --variable-renaming=tiny \
+  --rename-parameters=true
 
 if [ -d "$ROOT/libs" ]; then
   for jar in "$ROOT"/libs/*.jar; do
