@@ -15,23 +15,25 @@ if [ ! -f "$RTJAR" ]; then
   exit 1
 fi
 
-set -- "$JAVA_BIN" -Xmx30g -jar "$ROOT/tools/vineflower-1.11.2.jar" \
-  "--include-runtime=$JDK8_HOME" \
+LIBS=""
+if [ -d "$ROOT/libs" ]; then
+  for jar in "$ROOT"/libs/*.jar; do
+    [ -f "$jar" ] && LIBS="$LIBS -e $jar"
+  done
+fi
+
+echo "Input:  $INPUT"
+echo "Output: $OUTDIR"
+
+exec "$JAVA_BIN" -Xmx30g -jar "$ROOT/tools/vineflower-1.11.2.jar" \
+  --include-runtime "$JDK8_HOME" \
   -e "$RTJAR" \
   --ignore-invalid-bytecode \
   --old-try-dedup \
   --verify-merges \
-  --warn-inconsistent-inner-attributes=false \
-  --variable-renaming=tiny \
-  --rename-parameters=true
-
-if [ -d "$ROOT/libs" ]; then
-  for jar in "$ROOT"/libs/*.jar; do
-    [ -f "$jar" ] && set -- "$@" -e "$jar"
-  done
-fi
-
-set -- "$@" "$INPUT" "$OUTDIR"
-echo "Input:  $INPUT"
-echo "Output: $OUTDIR"
-"$@" 2>&1 | tee "$OUTDIR.log"
+  --warn-inconsistent-inner-attributes false \
+  --variable-renaming tiny \
+  --rename-parameters \
+  $LIBS \
+  "$INPUT" "$OUTDIR" \
+  2>&1 | tee "$OUTDIR.log"
