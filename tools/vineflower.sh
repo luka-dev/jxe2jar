@@ -25,5 +25,11 @@ if [ -d "$ROOT/libs" ]; then
   done
 fi
 
-set -- "$@" "$ROOT/out/mu1316_lsd.jar" "$ROOT/out/vf_out"
-"$@" > "$ROOT/out/vf.log"
+INPUT="${1:?Usage: vineflower.sh <input.jar> [output_dir]}"
+INPUT="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
+OUTDIR="${2:-${INPUT%.jar}-vf}"
+
+set -- "$@" "$INPUT" "$OUTDIR"
+echo "Input:  $INPUT"
+echo "Output: $OUTDIR"
+"$@" 2>&1 | tee "$OUTDIR.log"
