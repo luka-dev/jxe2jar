@@ -3,7 +3,12 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JAVA_BIN="${VINEFLOWER_JAVA:-java}"
-JDK8_HOME="$ROOT/jvms/zulu8.78.0.19-ca-jdk8.0.412-macosx_aarch64/zulu-8.jdk/Contents/Home"
+case "$(uname -s)" in
+  Darwin)  JDK8_HOME="$ROOT/jvms/zulu8.78.0.19-ca-jdk8.0.412-macosx_aarch64/zulu-8.jdk/Contents/Home" ;;
+  Linux)   JDK8_HOME="$ROOT/jvms/zulu8.78.0.19-ca-jdk8.0.412-linux_x64" ;;
+  MINGW*|MSYS*|CYGWIN*) JDK8_HOME="$ROOT/jvms/zulu8.78.0.19-ca-jdk8.0.412-win_x64" ;;
+  *) JDK8_HOME="${JDK8_HOME:?Unknown OS; set JDK8_HOME manually}" ;;
+esac
 RTJAR="$JDK8_HOME/jre/lib/rt.jar"
 
 INPUT="${1:?Usage: vineflower.sh <input.jar> [output_dir]}"
