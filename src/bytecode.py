@@ -740,6 +740,119 @@ def _find_float_constants(bytecode, cp, signature):
     return float_indices
 
 
+def _find_ternary_float_constants(bytecode, cp, known_float_indices=None):
+    """Reclassify ldc INTEGER constants that are really floats but live inside a
+    ternary branch.
+
+    J9/JVM store `int` and `float` ldc constants in the same INTEGER pool slot, and
+    the linear flow in `_find_float_constants` clears its stack at every branch, so a
+    constant sitting in one arm of a `cond ? A : B` expression is never seen flowing
+    into the float consumer. The result is one arm typed `int` and the other `float`,
+    which decompilers cannot unify ("No common supertype for ternary expression").
+
+    We match the ternary shape directly:  `ifXX L1 ; <arm A> ; goto L2 ; L1: <arm B> ; L2:`
+    If one arm's terminal push is an int-ldc and the other arm's is unambiguously a
+    float, Java type unification proves the int-ldc must be a float - so we return its
+    J9 CP index for reclassification. (int-vs-float is the only case we touch, so a
+    genuine int constant is never mis-typed.)
+    """
+    known_float_indices = known_float_indices or set()
+
+    FLOAT_TERMINAL = {
+        0x0B, 0x0C, 0x0D,              # fconst_0..2
+        0x17, 0x22, 0x23, 0x24, 0x25,  # fload, fload_0..3
+        0x30,                          # faload
+        0x76,                          # fneg
+        0x86, 0x89, 0x90,              # i2f, l2f, d2f
+        0x62, 0x66, 0x6A, 0x6E, 0x72,  # fadd, fsub, fmul, fdiv, frem
+        0xCD,                          # J9 wide fload
+    }
+
+    def _ldc_index(op, at):
+        if op == 0x12 and at + 2 <= len(bytecode):          # ldc
+            return bytecode[at + 1]
+        if op == 0x13 and at + 3 <= len(bytecode):          # ldc_w
+            return struct.unpack("<H", bytecode[at + 1 : at + 3])[0]
+        return None
+
+    def _int_ldc_index(op, at):
+        k = _ldc_index(op, at)
+        if k is None:
+            return None
+        t = cp.transform.get(k)
+        return k if (t and t.get("type") == CONST.INTEGER) else None
+
+    def _classify_arm(start, end):
+        """Return ('intconst', cp_idx) | ('float', None) | ('other', None) from the
+        arm's terminal value-producing instruction."""
+        kind, idx = "other", None
+        j = start
+        while j < end:
+            op = bytecode[j]
+            sz = _j9_instr_size(bytecode, j)
+            k = _ldc_index(op, j)
+            if k in known_float_indices:
+                kind, idx = "float", None
+            elif k is not None and _int_ldc_index(op, j) is not None:
+                kind, idx = "intconst", k
+            elif op in FLOAT_TERMINAL:
+                kind, idx = "float", None
+            elif op in (0xB6, 0xB7, 0xB8, 0xB9, 0xE7):      # invoke* -> float if returns F
+                co = 3 if op == 0xE7 else 1
+                if j + co + 2 <= len(bytecode):
+                    ci = struct.unpack("<H", bytecode[j + co : j + co + 2])[0]
+                    t = cp.transform.get(ci)
+                    d = t.get("descriptor", "") if t else ""
+                    r = d[d.rindex(")") + 1 :] if ")" in d else ""
+                    kind, idx = ("float", None) if (r and r[0] == "F") else ("other", None)
+                else:
+                    kind, idx = "other", None
+            elif op == 0xA7:                                # goto: not a push, keep prior
+                pass
+            else:
+                kind, idx = "other", None
+            j += sz if sz > 0 else 1
+        return kind, idx
+
+    result = set()
+    n = len(bytecode)
+    i = 0
+    while i < n:
+        op = bytecode[i]
+        sz = _j9_instr_size(bytecode, i)
+        if ((0x99 <= op <= 0xA6) or op in (0xC6, 0xC7)) and i + 3 <= n:
+            rel = struct.unpack("<h", bytecode[i + 1 : i + 3])[0]
+            T = i + rel                                     # L1 (ifXX target = arm B start)
+            a_start = i + 3
+            if a_start < T <= n:
+                g = l2 = None
+                if (
+                    T - 3 >= a_start
+                    and T <= n
+                    and bytecode[T - 3] == 0xA7
+                ):                                          # goto (3B) ends arm A
+                    g = T - 3
+                    if g + 3 <= n:
+                        l2 = g + struct.unpack("<h", bytecode[g + 1 : g + 3])[0]
+                elif (
+                    T - 5 >= a_start
+                    and T <= n
+                    and bytecode[T - 5] == 0xC8
+                ):                                          # goto_w (5B)
+                    g = T - 5
+                    if g + 5 <= n:
+                        l2 = g + struct.unpack("<i", bytecode[g + 1 : g + 5])[0]
+                if g is not None and l2 is not None and T < l2 <= n:
+                    ka, ia = _classify_arm(a_start, g)
+                    kb, ib = _classify_arm(T, l2)
+                    if ka == "intconst" and kb == "float":
+                        result.add(ia)
+                    elif kb == "intconst" and ka == "float":
+                        result.add(ib)
+        i += sz if sz > 0 else 1
+    return result
+
+
 def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
     """Transforms bytecode and returns (new_bytecode, offset_map)."""
     i = 0
@@ -747,6 +860,8 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
 
     # Pre-pass: identify float constants via stack simulation
     float_cp_indices = _find_float_constants(bytecode, cp, signature)
+    # Pre-pass: float constants hidden inside ternary branches (int/float merge)
+    float_cp_indices |= _find_ternary_float_constants(bytecode, cp, float_cp_indices)
     for j9_idx in float_cp_indices:
         t = cp.transform.get(j9_idx)
         if t and t.get("type") == CONST.INTEGER:
@@ -778,6 +893,7 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             JBOpcode.JBcheckcast,
             JBOpcode.JBinstanceof,
         ):
+            op_pos = len(new_bytecode)
             new_bytecode.append(opcode)
             if i + 3 > len(bytecode):
                 break
@@ -787,6 +903,20 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             transform = cp.transform.get(index)
             if not transform:
                 break
+            # J9 devirtualizes `invokevirtual` of a final method into `invokespecial`
+            # (final => statically bindable). Standard bytecode forbids invokespecial
+            # to a superclass method on a non-`this` receiver, so the HotSpot verifier
+            # rejects it ("Incompatible object argument for invokespecial"). Object's
+            # getClass/wait/notify/notifyAll are final - virtual and non-virtual dispatch
+            # are identical and no super-call is possible - so restoring invokevirtual is
+            # always safe. (The common trigger is the `x.getClass()` NPE/equals idiom.)
+            if (
+                opcode == JBOpcode.JBinvokespecial
+                and transform.get("ref_class") == "java/lang/Object"
+                and transform.get("ref_name")
+                in ("getClass", "wait", "notify", "notifyAll")
+            ):
+                new_bytecode[op_pos] = JBOpcode.JBinvokevirtual
             new_index = transform["new_index"]
             tmp = struct.pack(">H", new_index + 1)
             new_bytecode += tmp

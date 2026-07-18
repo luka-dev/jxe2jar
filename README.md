@@ -18,8 +18,23 @@ The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** r
 ### Classfile Version
 - **Before:** Wrote ROM class version as-is (can be non-standard).
 - **Now:**
-  - Infers minimal version from flags/opcodes (minimum 46, no upper cap).
-  - Bumps to 49 when synthetic/enum/annotation flags are present so `javac`/`javap` accept output.
+  - Infers minimal version from class/field/method flags (minimum 46).
+  - Bumps to 49 when synthetic/enum/annotation/bridge/varargs flags are present so `javac`/`javap` accept output.
+  - **No version >= 50.** The J9 romizer strips `StackMapTable`, which the type-checking verifier (class version >= 50) *requires* - so any >= 50 stamp yields a class that fails `-Xverify:all` with *"Expecting a stack map frame"*. Version <= 49 keeps every class on the old inference verifier, which needs no stack maps. An earlier heuristic bumped to 51 on a raw `0xBA in bytecode` byte-scan for invokedynamic; that false-positived on 1559 firmware classes with zero real invokedynamic (and the converter emits no `BootstrapMethods`, so a genuine one couldn't be produced anyway). Removed - firmware is javac-7 max with no invokedynamic. Result: whole-jar `v>=50` count 1559 -> 0, all now verifiable.
+
+### Devirtualized `invokespecial` -> `invokevirtual`
+- **Problem:** J9's romizer devirtualizes `invokevirtual` of a *final* method into `invokespecial` (a final method binds statically). Standard bytecode forbids `invokespecial` to a superclass method on a receiver not assignable to the current class, so HotSpot's verifier rejects it with *"Incompatible object argument for invokespecial"*. The near-universal trigger is the `x.getClass()` idiom - the NPE-guard the compiler inserts, and `this.getClass() != o.getClass()` in `equals()` - where the receiver is a parameter, not `this`.
+- **Fix:** during bytecode translation, `invokespecial` whose target is one of `java/lang/Object`'s final methods (`getClass`, `wait`, `notify`, `notifyAll`) is rewritten to `invokevirtual`. Safe because these are final: virtual and non-virtual dispatch are identical and no `super`-call is possible. Constructors (`<init>`), private-method calls, and genuine `super.m()` (receiver `this`, verifies fine) are left untouched. Resolution needs the methodref's class+name, so both const-pool build paths (`J9CONST.REF` and the `J9CONST.LONG`-decoded ref) carry `ref_class`/`ref_name` into the transform table.
+- **Result:** on a 404-class verification sample, `-Xverify:all` failures went 19 -> 0. (This was a pre-existing bug masked on `v51` classes by the missing-stack-map error; it surfaced only once versions were capped at 49. It never affected decompilation - VF/CFR render these classes fine either way.)
+
+### Constant-pool tail integrity
+Whole-jar `-Xverify:all` (30004 classes) also surfaced three narrow correctness bugs in how the ROM constant pool is read, each affecting a handful of classes:
+- **Dropped CP slot -> index shift.** The reader looped `rom_constant_pool_count` times and, on `EOFError` from a slot whose pointer-chase ran off the end (J9 padding in the ram/rom-count gap), silently skipped the entry. That left the entry list one short, shifting every later CP index by one and silently rewiring all references after it. Fixed by appending a placeholder constant on `EOFError` so list indices stay aligned with ROM indices (`jxe.py`). Two classes were affected (`ParserTokenManager`, `TimeUnit$4`).
+- **Null/garbage CP entries reach the classfile.** Those padding slots can decode to a `CONSTANT_Class` with an empty name, or a field/method ref whose name is really a type descriptor (`Lx/Y;`) or whose descriptor is garbage (`JJTANDNODE`) - all rejected by the loader (`Illegal class name` / `Illegal field name` / `illegal signature`). They are always unreferenced. `constpool.py` now substitutes a valid placeholder name (`java/lang/Object` for classes) and, via `_sanitized_ref`, replaces an illegal member name/descriptor with an inert `_pad:Ljava/lang/Object;`. The descriptor check is exact (a primitive descriptor is a single char - `JJTANDNODE` is *not* `long` just because it starts with `J`).
+- **Net result:** whole-jar `-Xverify:all` -> **0 VerifyError, 0 ClassFormatError** across all 30004 classes (remaining non-OK are benign: `java.*` package classes the app loader refuses to define, and classes whose supertypes were excluded via `--skip-libs`).
+
+### Modified UTF-8 for string constants
+Classfile `CONSTANT_Utf8` uses JVM **Modified UTF-8** (JVMS 4.4.7), not standard UTF-8. The converter previously wrote `str.encode("utf-8", "surrogatepass")`, which differs in two loader-enforced ways: `U+0000` must be `0xC0 0x80` (never a bare `0x00`), and a supplementary char must be its UTF-16 surrogate pair as two 3-byte sequences (never a single 4-byte sequence). Plain ASCII/BMP text is identical, so this only bites strings carrying NULs or astral chars - e.g. `java.text.CollationRules`, whose rule string embeds `U+0000..U+001F`, was rejected with *"Illegal UTF8 string in constant pool"*. `_encode_utf8` now emits proper Modified UTF-8. (Surfaced only when converting the JDK/`java.*` classes too - pass `--skip-jdk <emptyfile>` to convert every ROM class, not just the firmware ones.)
 
 ### Field Parsing and Constants
 - **Before:** Ignored ROM field constant values.
@@ -35,6 +50,7 @@ The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** r
   - Encodes UTF-8 with `surrogatepass` to keep odd ROM strings stable.
   - Decodes J9 ROM "LONG" slots into proper field/method refs using ROM base offsets.
   - **Float constant recovery:** J9 stores both `int` and `float` as `J9CONST.INT` (type 0) - the ROM format has no int/float distinction. A bytecode pre-pass with stack simulation (`_find_float_constants`) walks each method before translation, tracking which `ldc`/`ldc_w` constant pool entries flow into float-consuming operations (`fstore`, `fadd`, `fcmpg`, `putfield` with `F` descriptor, `invoke*` with `F` parameters, etc.). Identified entries are reclassified from `CONST.INTEGER` to `CONST.FLOAT` via `new_cp_transform`. The stack simulation correctly models `getfield` (pop objectref + push value), array loads (pop index + arrayref + push value), and other opcodes to keep parameter positions aligned with invoke descriptors.
+  - **Float constants inside ternary branches:** the linear stack pass above clears its stack at every branch, so a float constant that lives in one arm of `cond ? A : B` is never seen flowing into the float consumer - it stays typed `int`, the other arm stays `float`, and decompilers throw *"No common supertype for ternary expression"*. A second pass `_find_ternary_float_constants` pattern-matches the ternary shape (`ifXX L1 ; armA ; goto L2 ; L1: armB ; L2:`) and, when one arm's terminal push is an int-ldc and the other's is unambiguously float (`fconst`/`fload`/`faload`/`fneg`/`i2f`/`l2f`/`d2f`/f-arith/f-returning `invoke`, or an ldc already reclassified float), reclassifies the int-ldc to float. int-vs-float is the only trigger, so genuine int constants are never mis-typed. This alone took the MU1316 LSD decompile from 15 -> ~1 un-decompilable class (the remainder is an unrelated VF parsing bug on an IBM stdlib method). Bounds on the `goto`/`goto_w` offset (`T < l2 <= n`) are load-bearing - without them a malformed offset crashes the whole class's conversion.
 
 ### Bytecode Translation
 - **Before:** Basic mapping, missing J9 wide opcodes and invokeinterface handling.
@@ -86,14 +102,23 @@ The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** r
 - Use `--skip-jdk /path/to/rt.jar` to override the JDK/JRE skip list.
 - Use `--skip-classes` to provide additional JAR/JMOD/list files or a directory.
 - The converter preserves `ACC_SYNTHETIC` by default. Use `--strip-synthetic` if you need strict `javap` output for 45.0 classes.
-- Classfile versions are inferred from flags/opcodes with a minimum of 46 (no upper cap).
+- Classfile versions are inferred from flags with a minimum of 46 and never exceed 49 (keeps every class on the stack-map-free inference verifier; see Classfile Version above).
 - Some large binaries/ISOs are referenced via `.url` files pointing to original archives:
   - `vms/xp/en_vs_2005_pro_dvd.iso.url`
   - `vms/xp/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso.url`
 
 ## Decompiling
 
-**Recommendation:** Use Vineflower for primary analysis - fewer artifacts, cleaner inner class handling, no broken anonymous imports. Keep CFR output alongside for cross-referencing when VF struggles with a method.
+**Recommendation:** Use Vineflower for primary analysis - fewer artifacts, cleaner inner class handling, no broken anonymous imports. Keep CFR output alongside for cross-referencing on the rare method VF still can't do.
+
+**Vineflower version - use 1.12.0, renamer `jad`.** Two settings decide how many methods come out
+as `// $VF: Couldn't be decompiled` stubs on J9-converted classes:
+- `--variable-renaming=jad` (not `tiny`): `tiny`/`TinyNameProvider` throws NPE during LVT renaming.
+- **VF 1.12.0** (not 1.11.2): 1.11.2's `ExitHelper.cleanUpUnreachableBlocks` NPEs on methods with
+  unreachable blocks; fixed upstream in 1.12.0.
+
+Measured on `service.core.registration` bundle (455 classes): **1.11.2 `tiny` -> 399** broken files,
+**1.11.2 `jad` -> 1**, **1.12.0 `jad` -> 0**.
 
 ### Decompiling with Vineflower
 
@@ -104,13 +129,19 @@ bash tools/vineflower.sh out/MU1316-lsd.jar                    # output: out/MU1
 bash tools/vineflower.sh out/MIB3G-lsd.jar out/custom-dir      # custom output dir
 ```
 
-The script requires `jvms/zulu8.../` JDK8 to be present (for `--include-runtime` and `rt.jar`).
+The wrapper auto-selects the newest `tools/vineflower-*.jar` and picks the runtime itself.
+**Two Javas are involved:**
+- **VF 1.12.0 runs on Java 17+** (its own classes are class-file 61). The wrapper finds one via
+  `/usr/libexec/java_home -v 17+`, or honours `VINEFLOWER_JAVA=/path/to/java17+/bin/java`.
+- **`--include-runtime` stays the JDK 8** under `jvms/zulu8.../` (its `rt.jar` is what the *target*
+  1.2/1.3 firmware classes are resolved against). That JDK8 must still be present.
 
 <details>
 <summary>Equivalent manual command</summary>
 
 ```sh
-java -Xmx30g -jar tools/vineflower-1.11.2.jar \
+# note: run with a Java 17+ (VF 1.12.0 needs it); --include-runtime still points at JDK 8.
+java17+ -Xmx30g -jar tools/vineflower-1.12.0.jar \
   --decompile-generics=true \
   --decompile-enums=true \
   --decompile-assert=true \
@@ -137,7 +168,7 @@ java -Xmx30g -jar tools/vineflower-1.11.2.jar \
   --ignore-invalid-bytecode=true \
   --decompiler-comments=true \
   --dump-bytecode-on-error=true \
-  --variable-renaming=tiny \
+  --variable-renaming=jad \
   --rename-parameters=true \
   "--include-runtime=path/to/jdk8" \
   "--banner=" \
@@ -166,7 +197,7 @@ java -Xmx30g -jar tools/vineflower-1.11.2.jar \
 </details>
 
 Key options explained:
-- `--variable-renaming=tiny --rename-parameters=true` - camelCase variable names derived from type (J9 ROM has no debug info / LocalVariableTable)
+- `--variable-renaming=jad --rename-parameters=true` - readable variable names derived from type (J9 ROM has no debug info / LocalVariableTable). Use `jad`, **not** `tiny` - `tiny` (`TinyNameProvider`) NPEs during LVT renaming and leaves methods as un-decompiled stubs.
 - `--decompile-inner --remove-synthetic --remove-bridge` - inline anonymous classes, hide compiler-generated methods
 - `--ignore-invalid-bytecode` - don't crash on J9-converted bytecode edge cases
 - `--indent-string="    " --preferred-line-length=120` - readable formatting

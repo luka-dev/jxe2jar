@@ -496,10 +496,18 @@ class J9ROMClass:
                         J9ROMConstant.read(stream, base, class_name, class_count)
                     )
                 except EOFError:
-                    # Usual between ram_constant_pool_count and rom_constant_pool_count
-                    # liy double const but in some cases last element contain not valid
-                    # string const, so we skip sthis case
-                    pass
+                    # A CP slot whose pointer-chase hit EOF - J9 padding that sits
+                    # between ram_constant_pool_count and rom_constant_pool_count.
+                    # The main stream is already advanced past this slot (pointer
+                    # reads use StreamCursor, which restores position), so we MUST
+                    # still append a placeholder: dropping the entry shifts every
+                    # later CP index by one, which silently rewires all constant-pool
+                    # references after it (wrong classes, swapped field name/descriptor)
+                    # and yields a class the loader rejects. A zero INTEGER is inert
+                    # for these unreferenced padding slots.
+                    constant_pool.append(
+                        J9ROMConstant(ConstType.INT, value=b"\x00\x00\x00\x00")
+                    )
 
         return J9ROMClass(
             minor,

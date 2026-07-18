@@ -28,7 +28,58 @@ class J9CONST(int, Enum):
 
 
 def _encode_utf8(value: str) -> bytes:
-    return value.encode("utf-8", "surrogatepass")
+    """Encode to JVM *Modified* UTF-8 (JVMS 4.4.7), not standard UTF-8.
+
+    Two differences from standard UTF-8 that the loader enforces:
+      * U+0000 is written as 0xC0 0x80, never a bare 0x00 byte.
+      * A supplementary char (>= U+10000) is written as its UTF-16 surrogate
+        pair, each surrogate as a 3-byte sequence (6 bytes total), never as a
+        4-byte sequence.
+    Plain ASCII/BMP text is byte-identical to standard UTF-8, so only strings
+    carrying NULs (e.g. java.text.CollationRules) or astral chars change.
+    """
+    out = bytearray()
+    for ch in value:
+        c = ord(ch)
+        if c == 0x00:
+            out += b"\xc0\x80"
+        elif c <= 0x7F:
+            out.append(c)
+        elif c <= 0x7FF:
+            out.append(0xC0 | (c >> 6))
+            out.append(0x80 | (c & 0x3F))
+        elif c <= 0xFFFF:  # covers lone surrogates too (3-byte, as JVM expects)
+            out.append(0xE0 | (c >> 12))
+            out.append(0x80 | ((c >> 6) & 0x3F))
+            out.append(0x80 | (c & 0x3F))
+        else:  # supplementary -> UTF-16 surrogate pair, each as 3 bytes
+            c -= 0x10000
+            for sur in (0xD800 | (c >> 10), 0xDC00 | (c & 0x3FF)):
+                out.append(0xE0 | (sur >> 12))
+                out.append(0x80 | ((sur >> 6) & 0x3F))
+                out.append(0x80 | (sur & 0x3F))
+    return bytes(out)
+
+
+def _sanitized_ref(name, descriptor):
+    """Make a field/method ref's name+descriptor well-formed.
+
+    J9 padding slots in the ram/rom constant-pool gap can be misparsed as refs
+    whose "name" is actually a type descriptor (contains '/', ';', '[', '.') and
+    whose "descriptor" is garbage. The loader rejects such names ("Illegal field
+    name"). These slots are always unreferenced, so keep the entry but replace an
+    illegal name/descriptor with a well-formed, inert placeholder.
+    """
+    illegal_name = (not name) or any(c in name for c in "./;[")
+    ok_desc = bool(descriptor) and (
+        (descriptor[0] == "(" and ")" in descriptor)  # method descriptor
+        or (len(descriptor) == 1 and descriptor in "BCDFIJSZ")  # primitive
+        or descriptor[0] == "["  # array field descriptor
+        or (descriptor[0] == "L" and descriptor.endswith(";"))  # object field
+    )
+    if illegal_name or not ok_desc:
+        return "_pad", "Ljava/lang/Object;"
+    return name, descriptor
 
 
 class ConstPool:
@@ -81,6 +132,7 @@ class ConstPool:
                 decoded = self._try_decode_ref_from_long(constant)
                 if decoded:
                     _class, name, descriptor = decoded
+                    name, descriptor = _sanitized_ref(name, descriptor)
                     index = len(self.pool)
                     const_type = (
                         CONST.METHODREF
@@ -110,6 +162,8 @@ class ConstPool:
                         "new_index": index,
                         "type": const_type,
                         "descriptor": descriptor,
+                        "ref_class": _class,
+                        "ref_name": name,
                     }
                 else:
                     index = len(self.pool)
@@ -131,7 +185,13 @@ class ConstPool:
             elif constant.type == J9CONST.CLASS:
                 index = len(self.pool)
                 self.pool.append([CONST.CLASS, ""])
-                value = _encode_utf8(constant.value)
+                # J9 ROM constant pools can hold a null/unresolved CLASS slot
+                # (name pointer == 0 -> empty name). A CONSTANT_Class with an empty
+                # UTF8 name is rejected by the loader ("Illegal class name"), even
+                # though such slots are unreferenced. Keep the slot (CP indices must
+                # stay contiguous) but give it a valid placeholder name.
+                class_name = constant.value or "java/lang/Object"
+                value = _encode_utf8(class_name)
                 stack.append(
                     (
                         index,
@@ -142,15 +202,18 @@ class ConstPool:
                 self.transform[i] = {"new_index": index, "type": CONST.CLASS}
             elif constant.type == J9CONST.REF:
                 index = len(self.pool)
+                ref_name, ref_desc = _sanitized_ref(
+                    constant.name, constant.descriptor
+                )
                 const_type = (
                     CONST.METHODREF
-                    if constant.descriptor.find("(") >= 0
+                    if ref_desc.find("(") >= 0
                     else CONST.FIELDREF
                 )
                 self.pool.append([const_type, "", ""])
                 value_class = _encode_utf8(constant._class)
-                value_c_name = _encode_utf8(constant.name)
-                value_c_desc = _encode_utf8(constant.descriptor)
+                value_c_name = _encode_utf8(ref_name)
+                value_c_desc = _encode_utf8(ref_desc)
                 stack.append(
                     (
                         index,
@@ -170,6 +233,8 @@ class ConstPool:
                     "new_index": index,
                     "type": const_type,
                     "descriptor": constant.descriptor,
+                    "ref_class": constant._class,
+                    "ref_name": constant.name,
                 }
 
         for elem in stack:

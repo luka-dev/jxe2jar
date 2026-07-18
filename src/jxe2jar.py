@@ -2,7 +2,8 @@
 
 This script parses a JXE image and reconstructs .class files that are
 compatible with common JVM tooling. It performs a small set of fixups:
- - Infers a minimal classfile version from flags/opcodes (min 46, no upper cap).
+ - Infers a minimal classfile version from flags (min 46, effectively capped at
+   49 so the romizer-stripped StackMapTable is never required by the verifier).
  - Rewrites J9-specific bytecode patterns to standard JVM bytecode.
  - Rebuilds constant pool entries (including ConstantValue where possible).
 
@@ -129,11 +130,16 @@ def _infer_classfile_major(romclass) -> int:
             required = max(required, 49)
         if method.modifier & 0x1000:
             required = max(required, 49)
-        # invokedynamic requires Java 7+ (opcode 0xBA)
-        if method.bytecode and 0xBA in method.bytecode:
-            required = max(required, 51)
+        # NOTE: no invokedynamic (0xBA) bump. A raw `0xBA in bytecode` byte-scan
+        # false-positives on 0xBA operands (it flagged 1559 firmware classes that
+        # have zero real invokedynamic). And the converter emits no BootstrapMethods,
+        # so a genuine invokedynamic couldn't be produced anyway. Capping at 49 keeps
+        # every class on the old inference verifier (no StackMapTable required), which
+        # the romizer strips - otherwise v50+ classes fail -Xverify:all.
 
-    # Keep at least 46; allow higher versions when required by flags/opcodes.
+    # J9/CDC firmware is javac-7 max with no invokedynamic; 49 covers every used
+    # feature (annotations, enums, bridge/varargs, synthetic) and stays verifiable
+    # without stack maps.
     return max(required, 46)
 
 
