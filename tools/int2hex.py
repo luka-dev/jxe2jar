@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-int2hex.py — Heuristic integer-to-hex converter for decompiled Java sources.
+int2hex.py - Heuristic integer-to-hex converter for decompiled Java sources.
 
 Scans .java files and replaces decimal integer literals with hex where the
 hex representation is more readable/meaningful. Uses heuristic rules:
 
-  1. Bitmask patterns  — single bit set (powers of 2), or few bits set
-  2. All-ones masks    — 0xFF, 0xFFFF, 0xFFFFFFFF, etc.
-  3. Byte-aligned      — values whose hex is "round" (trailing 00s)
-  4. Nibble-clean      — values where most hex nibbles are 0 or F
-  5. Color-like        — 0xAARRGGBB patterns (large values with alpha byte)
-  6. Shift results     — values exactly 2^N or 2^N - 1
-  7. Context hints     — variable/field names containing mask, flag, color, etc.
+  1. Bitmask patterns  - single bit set (powers of 2), or few bits set
+  2. All-ones masks    - 0xFF, 0xFFFF, 0xFFFFFFFF, etc.
+  3. Byte-aligned      - values whose hex is "round" (trailing 00s)
+  4. Nibble-clean      - values where most hex nibbles are 0 or F
+  5. Color-like        - 0xAARRGGBB patterns (large values with alpha byte)
+  6. Shift results     - values exactly 2^N or 2^N - 1
+  7. Context hints     - variable/field names containing mask, flag, color, etc.
 
 Does NOT convert:
   - Small numbers (-128..255) unless context strongly suggests hex
@@ -95,7 +95,7 @@ def score_as_hex(value, context_line=""):
 
     abs_val = abs(value)
 
-    # Very small values — almost never hex
+    # Very small values - almost never hex
     if abs_val < 256:
         # Exception: exact bit patterns like 0x80 = 128 (already in HUMAN)
         if abs_val in (0x55, 0xAA, 0x7E, 0x7C):
@@ -175,7 +175,7 @@ def score_as_hex(value, context_line=""):
         score += 0.8
         reasons.append("context_hint")
 
-    # Values > 2^20 that aren't round decimal — probably hex
+    # Values > 2^20 that aren't round decimal - probably hex
     if abs_val > (1 << 20) and abs_val not in HUMAN_NUMBERS:
         dec_str = str(abs_val)
         # Not a round decimal (doesn't end in multiple zeros)
@@ -306,7 +306,7 @@ def apply_replacements(filepath, replacements):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Heuristic int→hex converter for decompiled Java sources"
+        description="Heuristic int->hex converter for decompiled Java sources"
     )
     parser.add_argument("dir", help="Directory of .java files to scan")
     parser.add_argument("--apply", action="store_true",
@@ -343,7 +343,7 @@ def main():
         for (line_no, col, old, new, score, reason) in results:
             all_results.append((str(rel), line_no, col, old, new, score, reason))
             if args.verbose:
-                print(f"  {rel}:{line_no}  {old} → {new}  ({score:.1f} {reason})")
+                print(f"  {rel}:{line_no}  {old} -> {new}  ({score:.1f} {reason})")
 
         if args.apply:
             apply_replacements(str(filepath), results)
@@ -366,7 +366,7 @@ def main():
     if all_results and not args.verbose:
         print(f"\nSample conversions (showing first 20):")
         for (rel, line_no, col, old, new, score, reason) in all_results[:20]:
-            print(f"  {rel}:{line_no}  {old:>15s} → {new:<15s}  ({score:.1f} {reason})")
+            print(f"  {rel}:{line_no}  {old:>15s} -> {new:<15s}  ({score:.1f} {reason})")
 
     # CSV report
     if args.report:

@@ -372,7 +372,7 @@ def _parse_param_types(descriptor):
     while i < len(descriptor) and descriptor[i] != ")":
         ch = descriptor[i]
         if ch == "[":
-            # Array — skip all '[' then the component type
+            # Array - skip all '[' then the component type
             while i < len(descriptor) and descriptor[i] == "[":
                 i += 1
             if i < len(descriptor) and descriptor[i] == "L":
@@ -468,7 +468,7 @@ def _find_float_constants(bytecode, cp, signature):
     POP1_PUSH1_OPS = {
         0xB4,  # getfield (pop objectref, push field value)
         0xBE,  # arraylength (pop arrayref, push length)
-        0xC0,  # checkcast (pop ref, push ref — type unchanged)
+        0xC0,  # checkcast (pop ref, push ref - type unchanged)
         0xC1,  # instanceof (pop ref, push int)
     }
 
@@ -477,7 +477,7 @@ def _find_float_constants(bytecode, cp, signature):
         0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,  # iaload..saload
     }
 
-    # Return-1 opcodes (J9) — pop 1 value, mark as float if sig says F
+    # Return-1 opcodes (J9) - pop 1 value, mark as float if sig says F
     RETURN1_OPS = {0xAD, 0xB0, 0xF5}  # JBreturn1, JBsyncReturn1, JBretFromNative1
 
     i = 0
@@ -856,13 +856,13 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             if cp_len is not None and index == cp_len and index > 0:
                 index -= 1
             if cp.check_transform(index, b"\x06"):
-                # Already DOUBLE (8 bytes + phantom) — just keep it.
+                # Already DOUBLE (8 bytes + phantom) - just keep it.
                 transform = cp.get_transform(index)
                 new_index = transform["new_index"]
                 tmp = struct.pack(">H", new_index + 1)
                 new_bytecode += tmp
             elif cp.check_transform(index, b"\x03"):
-                # INTEGER (4 bytes, no phantom) — create proper DOUBLE entry.
+                # INTEGER (4 bytes, no phantom) - create proper DOUBLE entry.
                 transform = cp.get_transform(index)
                 old_index = transform["new_index"]
                 raw = cp.get_int(old_index)
@@ -1004,7 +1004,7 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             new_bytecode.append(0xAD)  # lreturn
             i += 1
         elif opcode in (JBOpcode.JBgenericReturn, JBOpcode.JBreturnToMicroJIT):
-            # Generic return — infer from full method signature.
+            # Generic return - infer from full method signature.
             new_bytecode.append(_return_opcode_for_signature(signature))
             i += 1
         elif opcode in (JBOpcode.JBasyncCheck, JBOpcode.JBbreakpoint, JBOpcode.JBimpdep1, JBOpcode.JBimpdep2):

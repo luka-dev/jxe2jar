@@ -2,7 +2,18 @@
 set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-JAVA_BIN="${VINEFLOWER_JAVA:-java}"
+# Vineflower 1.12.0 is compiled for Java 17 (class 61); it must RUN on a JDK 17+.
+# (rt.jar for --include-runtime stays JDK8 below, for decompiling the old target classes.)
+if [ -n "$VINEFLOWER_JAVA" ]; then
+  JAVA_BIN="$VINEFLOWER_JAVA"
+elif [ -x /usr/libexec/java_home ] && J17="$(/usr/libexec/java_home -v 17+ 2>/dev/null)"; then
+  JAVA_BIN="$J17/bin/java"
+else
+  JAVA_BIN="java"   # assume a 17+ java is on PATH
+fi
+# Pick newest available vineflower jar in tools/
+VF_JAR="$(ls -1 "$ROOT"/tools/vineflower-*.jar 2>/dev/null | grep -vE 'slim|sources|javadoc' | sort -V | tail -1)"
+VF_JAR="${VF_JAR:-$ROOT/tools/vineflower-1.12.0.jar}"
 case "$(uname -s)" in
   Darwin)  JDK8_HOME="$ROOT/jvms/zulu8.78.0.19-ca-jdk8.0.412-macosx_aarch64/zulu-8.jdk/Contents/Home" ;;
   Linux)   JDK8_HOME="$ROOT/jvms/zulu8.78.0.19-ca-jdk8.0.412-linux_x64" ;;
@@ -22,7 +33,7 @@ fi
 
 # All --flag=value options first
 args=(
-  "$JAVA_BIN" -Xmx30g -jar "$ROOT/tools/vineflower-1.11.2.jar"
+  "$JAVA_BIN" -Xmx30g -jar "$VF_JAR"
   --decompile-generics=true
   --decompile-enums=true
   --decompile-assert=true
@@ -49,7 +60,7 @@ args=(
   --ignore-invalid-bytecode=true
   --decompiler-comments=true
   --dump-bytecode-on-error=true
-  --variable-renaming=tiny
+  --variable-renaming=jad
   --rename-parameters=true
   "--banner="
   "--indent-string=    "

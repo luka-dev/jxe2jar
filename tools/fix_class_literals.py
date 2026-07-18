@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-fix_class_literals.py — Collapse Java 1.2 class$ patterns back to Foo.class
+fix_class_literals.py - Collapse Java 1.2 class$ patterns back to Foo.class
 
 Replaces the pre-Java 5 class literal pattern:
   (class$foo$bar == null ? (class$foo$bar = class$("foo.bar")) : class$foo$bar)
@@ -13,7 +13,7 @@ Handles variants from both CFR and Vineflower output:
   - CFR:  ClassName.class$("pkg.Name")
   - VF:   class$("pkg.Name")
   - Both: multi-line and single-line ternaries
-  - Array class refs: array$Ljava$lang$Object  →  Object[].class
+  - Array class refs: array$Ljava$lang$Object  ->  Object[].class
 
 Usage:
   python3 tools/fix_class_literals.py <dir>            # dry-run (report only)
@@ -45,7 +45,7 @@ TERNARY_PATTERN = re.compile(
     r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on assignment
     r'(?:class|array)\$[\w$]+\s*=\s*'
     r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on class$() call
-    r'class\$\(\s*"([^"]+)"\s*\)'       # class$("fqn") — capture the FQN
+    r'class\$\(\s*"([^"]+)"\s*\)'       # class$("fqn") - capture the FQN
     r'\s*\)\s*'
     r':\s*(?:[\w$]+\s*\.\s*)?'          # optional ClassName. prefix on else branch
     r'(?:class|array)\$[\w$]+\s*'
@@ -60,13 +60,13 @@ FIELD_PATTERN = re.compile(
     re.MULTILINE
 )
 
-# Match the synthetic class$() method — CFR style with /* synthetic */ comment
+# Match the synthetic class$() method - CFR style with /* synthetic */ comment
 METHOD_PATTERN_CFR = re.compile(
     r'^\s+static\s+/\*\s*synthetic\s*\*/\s+Class\s+class\$\(String[^)]*\)\s*\{[^}]*?\}\s*\n',
     re.MULTILINE | re.DOTALL
 )
 
-# Match the synthetic class$() method — plain style (VF or CFR without synthetic comment)
+# Match the synthetic class$() method - plain style (VF or CFR without synthetic comment)
 # Uses a non-greedy match on the body, anchored by Class.forName or NoClassDefFoundError
 METHOD_PATTERN_PLAIN = re.compile(
     r'^\s+static\s+Class\s+class\$\(String[^)]*\)\s*\{[^}]*?NoClassDefFoundError[^}]*?\}\s*\n',
@@ -77,9 +77,9 @@ METHOD_PATTERN_PLAIN = re.compile(
 def fqn_to_class_literal(fqn):
     """
     Convert a Class.forName argument to a .class literal.
-      "de.audi.app.Foo"       → "de.audi.app.Foo.class"
-      "[Ljava.lang.Object;"   → "Object[].class"
-      "[[I"                   → "int[][].class"
+      "de.audi.app.Foo"       -> "de.audi.app.Foo.class"
+      "[Ljava.lang.Object;"   -> "Object[].class"
+      "[[I"                   -> "int[][].class"
     """
     # Array types
     if fqn.startswith("["):

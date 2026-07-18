@@ -6,12 +6,12 @@ Tools and notes for converting **IBM J9/CDC JXE (rom.classes)** images back to s
 
 | Directory | Description |
 |-----------|-------------|
-| `src/` | Python implementation of **JXE → JAR** conversion |
+| `src/` | Python implementation of **JXE -> JAR** conversion |
 | `test/custom_edgecases/` | Exhaustive edge-case suite (Java 1.2) to validate the converter |
 | `out/` | Conversion outputs and logs |
-| `vms/` | Virtualized environments for legacy tooling (XP VM → WM5 emulator → jar2jxe) |
+| `vms/` | Virtualized environments for legacy tooling (XP VM -> WM5 emulator -> jar2jxe) |
 
-The converter is validated through edge-case tests and a **JAR → JXE → JAR** round-trip pipeline.
+The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** round-trip pipeline.
 
 ## Conversion Logic
 
@@ -34,7 +34,7 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
   - Supports INTEGER/FLOAT/LONG/DOUBLE/STRING/REF and preserves descriptors.
   - Encodes UTF-8 with `surrogatepass` to keep odd ROM strings stable.
   - Decodes J9 ROM "LONG" slots into proper field/method refs using ROM base offsets.
-  - **Float constant recovery:** J9 stores both `int` and `float` as `J9CONST.INT` (type 0) — the ROM format has no int/float distinction. A bytecode pre-pass with stack simulation (`_find_float_constants`) walks each method before translation, tracking which `ldc`/`ldc_w` constant pool entries flow into float-consuming operations (`fstore`, `fadd`, `fcmpg`, `putfield` with `F` descriptor, `invoke*` with `F` parameters, etc.). Identified entries are reclassified from `CONST.INTEGER` to `CONST.FLOAT` via `new_cp_transform`. The stack simulation correctly models `getfield` (pop objectref + push value), array loads (pop index + arrayref + push value), and other opcodes to keep parameter positions aligned with invoke descriptors.
+  - **Float constant recovery:** J9 stores both `int` and `float` as `J9CONST.INT` (type 0) - the ROM format has no int/float distinction. A bytecode pre-pass with stack simulation (`_find_float_constants`) walks each method before translation, tracking which `ldc`/`ldc_w` constant pool entries flow into float-consuming operations (`fstore`, `fadd`, `fcmpg`, `putfield` with `F` descriptor, `invoke*` with `F` parameters, etc.). Identified entries are reclassified from `CONST.INTEGER` to `CONST.FLOAT` via `new_cp_transform`. The stack simulation correctly models `getfield` (pop objectref + push value), array loads (pop index + arrayref + push value), and other opcodes to keep parameter positions aligned with invoke descriptors.
 
 ### Bytecode Translation
 - **Before:** Basic mapping, missing J9 wide opcodes and invokeinterface handling.
@@ -44,12 +44,12 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
   - `ldc` is promoted to `ldc_w` when CP index > 255.
   - J9 prefix opcodes are expanded correctly (e.g., implicit `aload_0` prefix).
   - J9 return opcodes are mapped to standard JVM returns based on method signature:
-    - `JBreturn0` / `JBsyncReturn0` / `JBreturnFromConstructor` / `JBretFromNative0` → `return`
-    - `JBreturn1` / `JBsyncReturn1` / `JBretFromNative1` → `ireturn` / `freturn` / `areturn`
-    - `JBreturn2` / `JBsyncReturn2` → `lreturn` / `dreturn`
-    - `JBretFromNativeF` / `JBretFromNativeD` / `JBretFromNativeJ` → typed returns
-    - `JBgenericReturn` / `JBreturnToMicroJIT` → inferred from descriptor
-  - J9 runtime/debug opcodes (`JBasyncCheck`, `JBbreakpoint`, `JBimpdep1`, `JBimpdep2`) → `nop`
+    - `JBreturn0` / `JBsyncReturn0` / `JBreturnFromConstructor` / `JBretFromNative0` -> `return`
+    - `JBreturn1` / `JBsyncReturn1` / `JBretFromNative1` -> `ireturn` / `freturn` / `areturn`
+    - `JBreturn2` / `JBsyncReturn2` -> `lreturn` / `dreturn`
+    - `JBretFromNativeF` / `JBretFromNativeD` / `JBretFromNativeJ` -> typed returns
+    - `JBgenericReturn` / `JBreturnToMicroJIT` -> inferred from descriptor
+  - J9 runtime/debug opcodes (`JBasyncCheck`, `JBbreakpoint`, `JBimpdep1`, `JBimpdep2`) -> `nop`
   - Branch and switch offsets are rewritten using output offset maps to avoid `javap` errors.
   - Switch padding uses output offset so alignment is correct.
   - Invalid/missing CP refs are handled defensively instead of crashing.
@@ -74,8 +74,8 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
    ```sh
    sh test/custom_edgecases/build.sh
    ```
-2. Convert JAR → JXE with `jar2jxe.exe` (see [`vms/xp/README.md`](vms/xp/README.md)).
-3. Convert JXE → JAR with Python:
+2. Convert JAR -> JXE with `jar2jxe.exe` (see [`vms/xp/README.md`](vms/xp/README.md)).
+3. Convert JXE -> JAR with Python:
    ```sh
    python3 src/jxe2jar.py input.jxe output.jar
    ```
@@ -93,7 +93,7 @@ The converter is validated through edge-case tests and a **JAR → JXE → JAR**
 
 ## Decompiling
 
-**Recommendation:** Use Vineflower for primary analysis — fewer artifacts, cleaner inner class handling, no broken anonymous imports. Keep CFR output alongside for cross-referencing when VF struggles with a method.
+**Recommendation:** Use Vineflower for primary analysis - fewer artifacts, cleaner inner class handling, no broken anonymous imports. Keep CFR output alongside for cross-referencing when VF struggles with a method.
 
 ### Decompiling with Vineflower
 
@@ -166,16 +166,16 @@ java -Xmx30g -jar tools/vineflower-1.11.2.jar \
 </details>
 
 Key options explained:
-- `--variable-renaming=tiny --rename-parameters=true` — camelCase variable names derived from type (J9 ROM has no debug info / LocalVariableTable)
-- `--decompile-inner --remove-synthetic --remove-bridge` — inline anonymous classes, hide compiler-generated methods
-- `--ignore-invalid-bytecode` — don't crash on J9-converted bytecode edge cases
-- `--indent-string="    " --preferred-line-length=120` — readable formatting
-- `--include-runtime=path/to/jdk8` — gives Vineflower access to JDK8's standard library for resolving `@Override` on standard interfaces like `Runnable`, `Iterator`, `Comparable`
-- `-Xmx30g` — large heap for 30k-class JAR
-- `--add-external=path` — use `--add-external=` (not `-e`) when passing via scripts; `-e` only works on the command line
+- `--variable-renaming=tiny --rename-parameters=true` - camelCase variable names derived from type (J9 ROM has no debug info / LocalVariableTable)
+- `--decompile-inner --remove-synthetic --remove-bridge` - inline anonymous classes, hide compiler-generated methods
+- `--ignore-invalid-bytecode` - don't crash on J9-converted bytecode edge cases
+- `--indent-string="    " --preferred-line-length=120` - readable formatting
+- `--include-runtime=path/to/jdk8` - gives Vineflower access to JDK8's standard library for resolving `@Override` on standard interfaces like `Runnable`, `Iterator`, `Comparable`
+- `-Xmx30g` - large heap for 30k-class JAR
+- `--add-external=path` - use `--add-external=` (not `-e`) when passing via scripts; `-e` only works on the command line
 
 **External library references (`--add-external`):**
-Vineflower can only add `@Override` annotations and resolve generics when it knows the parent class/interface. Classes inside the JAR resolve automatically, but SDK/framework classes that were excluded during conversion (via `--skip-libs`) are missing. Adding them back as external references with `--add-external=` gives Vineflower the type information it needs without including them in the output. Skip `-javadoc.jar` and `-sources.jar` — only use compiled JARs.
+Vineflower can only add `@Override` annotations and resolve generics when it knows the parent class/interface. Classes inside the JAR resolve automatically, but SDK/framework classes that were excluded during conversion (via `--skip-libs`) are missing. Adding them back as external references with `--add-external=` gives Vineflower the type information it needs without including them in the output. Skip `-javadoc.jar` and `-sources.jar` - only use compiled JARs.
 
 ### Decompiling with CFR
 
@@ -216,11 +216,11 @@ java -jar tools/cfr-0.152.jar out/MU1316-lsd.jar \
 ```
 
 Key options explained:
-- `--sugar*` / `--decode*` — recover high-level constructs (enums, asserts, boxing, lambdas, switches, try-with-resources, for-each)
-- `--removeboilerplate --removedeadmethods --removebadgenerics` — clean up compiler artifacts
-- `--hidebridgemethods --removeinnerclasssynthetics` — hide synthetic access methods
-- `--renameillegalidents` — fix identifiers that aren't valid Java (e.g. `$1`)
-- `--recover --allowcorrecting` — best-effort recovery on broken bytecode
+- `--sugar*` / `--decode*` - recover high-level constructs (enums, asserts, boxing, lambdas, switches, try-with-resources, for-each)
+- `--removeboilerplate --removedeadmethods --removebadgenerics` - clean up compiler artifacts
+- `--hidebridgemethods --removeinnerclasssynthetics` - hide synthetic access methods
+- `--renameillegalidents` - fix identifiers that aren't valid Java (e.g. `$1`)
+- `--recover --allowcorrecting` - best-effort recovery on broken bytecode
 
 ### Post-processing: fix_class_literals.py
 
@@ -254,15 +254,15 @@ Works on both CFR and Vineflower output.
 
 ### Post-processing: int2hex.py
 
-Decompilers output all integer constants in decimal. Values that are bitmasks, flags, or bit patterns are more readable in hex (e.g. `6291488` → `0x600020`). The `int2hex.py` script heuristically identifies these and converts them.
+Decompilers output all integer constants in decimal. Values that are bitmasks, flags, or bit patterns are more readable in hex (e.g. `6291488` -> `0x600020`). The `int2hex.py` script heuristically identifies these and converts them.
 
 Heuristics used (each contributes a score):
-- **Power of 2** — `4194304` → `0x400000`
-- **All-ones mask** — `2147483647` → `0x7FFFFFFF`
-- **Nibble-aligned** — trailing zero nibbles, e.g. `65536` → `0x10000`
-- **Sparse bits** — few bits set in a large value (bitmask pattern)
-- **Dense mask** — most bits set (e.g. `0x3FFFFF`)
-- **Context** — nearby bitwise operators (`&`, `|`, `~`) or hex literals on the same line
+- **Power of 2** - `4194304` -> `0x400000`
+- **All-ones mask** - `2147483647` -> `0x7FFFFFFF`
+- **Nibble-aligned** - trailing zero nibbles, e.g. `65536` -> `0x10000`
+- **Sparse bits** - few bits set in a large value (bitmask pattern)
+- **Dense mask** - most bits set (e.g. `0x3FFFFF`)
+- **Context** - nearby bitwise operators (`&`, `|`, `~`) or hex literals on the same line
 
 ```sh
 # Dry-run (report only)
@@ -278,13 +278,13 @@ python3 tools/int2hex.py out/MU1316-lsd-vf/ --threshold 1.0 --apply
 python3 tools/int2hex.py out/MU1316-lsd-vf/ --report report.csv
 ```
 
-Default threshold is 2.0 (conservative — bitmasks, masks, powers of 2). Use `--threshold 1.0` for aggressive conversion of borderline values like config IDs.
+Default threshold is 2.0 (conservative - bitmasks, masks, powers of 2). Use `--threshold 1.0` for aggressive conversion of borderline values like config IDs.
 
 ## See Also
 
-- [`src/README.md`](src/README.md) – Format knowledge and implementation details
-- [`test/custom_edgecases/README.md`](test/custom_edgecases/README.md) – Test coverage list
-- [`vms/xp/README.md`](vms/xp/README.md) – WM5 emulator + XP VM instructions
+- [`src/README.md`](src/README.md) - Format knowledge and implementation details
+- [`test/custom_edgecases/README.md`](test/custom_edgecases/README.md) - Test coverage list
+- [`vms/xp/README.md`](vms/xp/README.md) - WM5 emulator + XP VM instructions
 
 ## Credits
 
