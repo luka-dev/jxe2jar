@@ -360,6 +360,14 @@ def dump_romclass(
         )
 
     code_attr_name_index = const_pool.add(CONST.UTF8, "Code")
+    # J9 keeps a method's declared checked exceptions (throw_exceptions); restore the
+    # standard Exceptions attribute (the `throws` clause) from them. Add the name UTF8
+    # only when some method actually needs it.
+    exceptions_attr_name_index = (
+        const_pool.add(CONST.UTF8, "Exceptions")
+        if any(getattr(m, "throw_exceptions", None) for m in romclass.methods)
+        else None
+    )
 
     for method in romclass.methods:
         method_flags = method.modifier & METHOD_FLAG_MASK
@@ -420,6 +428,22 @@ def dump_romclass(
                     "attributes": [],
                 }
             )
+        if exceptions_attr_name_index is not None and getattr(
+            method, "throw_exceptions", None
+        ):
+            exc_indices = [
+                const_pool.add(CONST.CLASS, te.throw_type)
+                for te in method.throw_exceptions
+                if getattr(te, "throw_type", None)
+            ]
+            if exc_indices:
+                attributes.append(
+                    {
+                        "kind": "exceptions",
+                        "attribute_name_index": exceptions_attr_name_index,
+                        "exceptions": exc_indices,
+                    }
+                )
         method_info_list.append(
             {
                 "access_flags": method_flags,
@@ -468,8 +492,15 @@ def dump_romclass(
         stream.write_u16(method_info["name_index"])
         stream.write_u16(method_info["descriptor_index"])
         stream.write_u16(method_info["attributes_count"])
-        if method_info["attributes_count"]:
-            attribute = method_info["attributes"][0]
+        for attribute in method_info["attributes"]:
+            if attribute.get("kind") == "exceptions":
+                exc = attribute["exceptions"]
+                stream.write_u16(attribute["attribute_name_index"])
+                stream.write_u32(2 + 2 * len(exc))
+                stream.write_u16(len(exc))
+                for class_index in exc:
+                    stream.write_u16(class_index)
+                continue
             stream.write_u16(attribute["attribute_name_index"])
             stream.write_u32(attribute["attribute_length"])
             stream.write_u16(attribute["max_stack"])
