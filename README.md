@@ -33,18 +33,18 @@ question, this is the map.
 - **Now:**
   - Infers minimal version from class/field/method flags (minimum 46).
   - Bumps to 49 when synthetic/enum/annotation/bridge/varargs flags are present so `javac`/`javap` accept output.
-  - **No version >= 50.** The J9 romizer strips `StackMapTable`, which the type-checking verifier (class version >= 50) *requires* - so any >= 50 stamp yields a class that fails `-Xverify:all` with *"Expecting a stack map frame"*. Version <= 49 keeps every class on the old inference verifier, which needs no stack maps. An earlier heuristic bumped to 51 on a raw `0xBA in bytecode` byte-scan for invokedynamic; that false-positived on 1559 firmware classes with zero real invokedynamic (and the converter emits no `BootstrapMethods`, so a genuine one couldn't be produced anyway). Removed - firmware is javac-7 max with no invokedynamic. Result: whole-jar `v>=50` count 1559 -> 0, all now verifiable.
+  - **No version >= 50.** The J9 romizer strips `StackMapTable`, which the type-checking verifier (class version >= 50) *requires* - so any >= 50 stamp yields a class that fails `-Xverify:all` with *"Expecting a stack map frame"*. Version <= 49 keeps every class on the old inference verifier, which needs no stack maps. An earlier heuristic bumped to 51 on a raw `0xBA in bytecode` byte-scan for invokedynamic; that false-positives on any class whose bytecode merely contains a `0xBA` operand byte (and the converter emits no `BootstrapMethods`, so a genuine invokedynamic could not be produced anyway). Removed - CDC/J9 ROM images are pre-invokedynamic, so capping at 49 keeps every class verifiable.
 
 ### Devirtualized `invokespecial` -> `invokevirtual`  (`src/bytecode.py`)
 - **Problem:** J9's romizer devirtualizes `invokevirtual` of a *final* method into `invokespecial` (a final method binds statically). Standard bytecode forbids `invokespecial` to a superclass method on a receiver not assignable to the current class, so HotSpot's verifier rejects it with *"Incompatible object argument for invokespecial"*. The near-universal trigger is the `x.getClass()` idiom - the NPE-guard the compiler inserts, and `this.getClass() != o.getClass()` in `equals()` - where the receiver is a parameter, not `this`.
 - **Fix:** during bytecode translation, `invokespecial` whose target is one of `java/lang/Object`'s final methods (`getClass`, `wait`, `notify`, `notifyAll`) is rewritten to `invokevirtual`. Safe because these are final: virtual and non-virtual dispatch are identical and no `super`-call is possible. Constructors (`<init>`), private-method calls, and genuine `super.m()` (receiver `this`, verifies fine) are left untouched. Resolution needs the methodref's class+name, so both const-pool build paths (`J9CONST.REF` and the `J9CONST.LONG`-decoded ref) carry `ref_class`/`ref_name` into the transform table.
-- **Result:** on a 404-class verification sample, `-Xverify:all` failures went 19 -> 0. (This was a pre-existing bug masked on `v51` classes by the missing-stack-map error; it surfaced only once versions were capped at 49. It never affected decompilation - VF/CFR render these classes fine either way.)
+- **Result:** the affected classes verify. (This was a pre-existing bug masked on `v51` classes by the missing-stack-map error; it surfaced only once versions were capped at 49. It never affected decompilation - VF/CFR render these classes fine either way.)
 
 ### Constant-pool tail integrity  (`src/jxe.py`, `src/constpool.py`)
-Whole-jar `-Xverify:all` also surfaced three narrow correctness bugs in how the ROM constant pool is read, each affecting a handful of classes:
-- **Dropped CP slot -> index shift.** The reader looped `rom_constant_pool_count` times and, on `EOFError` from a slot whose pointer-chase ran off the end (J9 padding in the ram/rom-count gap), silently skipped the entry. That left the entry list one short, shifting every later CP index by one and silently rewiring all references after it. Fixed by appending a placeholder constant on `EOFError` so list indices stay aligned with ROM indices (`jxe.py`). Two classes were affected (`ParserTokenManager`, `TimeUnit$4`).
+Verifying the whole jar with `-Xverify:all` also surfaced three narrow correctness bugs in how the ROM constant pool is read:
+- **Dropped CP slot -> index shift.** The reader looped `rom_constant_pool_count` times and, on `EOFError` from a slot whose pointer-chase ran off the end (J9 padding in the ram/rom-count gap), silently skipped the entry. That left the entry list one short, shifting every later CP index by one and silently rewiring all references after it. Fixed by appending a placeholder constant on `EOFError` so list indices stay aligned with ROM indices (`jxe.py`).
 - **Null/garbage CP entries reach the classfile.** Those padding slots can decode to a `CONSTANT_Class` with an empty name, or a field/method ref whose name is really a type descriptor (`Lx/Y;`) or whose descriptor is garbage (`JJTANDNODE`) - all rejected by the loader (`Illegal class name` / `Illegal field name` / `illegal signature`). They are always unreferenced. `constpool.py` now substitutes a valid placeholder name (`java/lang/Object` for classes) and, via `_sanitized_ref`, replaces an illegal member name/descriptor with an inert `_pad:Ljava/lang/Object;`. The descriptor check is exact (a primitive descriptor is a single char - `JJTANDNODE` is *not* `long` just because it starts with `J`).
-- **Net result:** whole-jar `-Xverify:all` -> **0 VerifyError, 0 ClassFormatError** across all classes (remaining non-OK are benign: `java.*` package classes the app loader refuses to define, and classes whose supertypes were excluded via `--skip-libs`).
+- **Net result:** whole-jar `-Xverify:all` -> **0 VerifyError, 0 ClassFormatError** (remaining non-OK are benign: `java.*` package classes the app loader refuses to define, and classes whose supertypes were excluded via `--skip-libs`).
 
 ### Modified UTF-8 for string constants  (`src/constpool.py`)
 Classfile `CONSTANT_Utf8` uses JVM **Modified UTF-8** (JVMS 4.4.7), not standard UTF-8. The converter previously wrote `str.encode("utf-8", "surrogatepass")`, which differs in two loader-enforced ways: `U+0000` must be `0xC0 0x80` (never a bare `0x00`), and a supplementary char must be its UTF-16 surrogate pair as two 3-byte sequences (never a single 4-byte sequence). Plain ASCII/BMP text is identical, so this only bites strings carrying NULs or astral chars - e.g. `java.text.CollationRules`, whose rule string embeds `U+0000..U+001F`, was rejected with *"Illegal UTF8 string in constant pool"*. `_encode_utf8` now emits proper Modified UTF-8. (Surfaced only when converting the JDK/`java.*` classes too - pass `--skip-jdk <emptyfile>` to convert every ROM class, not just the firmware ones.)
@@ -54,34 +54,88 @@ The `InnerClasses` attribute is rebuilt from the **actual J9 ROM fields**, not g
 
 Per class, the entry set mirrors javac: itself, its enclosing nest chain, its members, and every nested class it references. References are collected from the constant pool, the superclass/interfaces (which live outside the CP), all field/method descriptors, and - crucially - the *output* constant pool's UTF-8 entries, since some refs (e.g. a synthetic `<init>(Outer$1)` accessor call) are reconstructed during conversion and never appear as J9 ROM constants.
 
-One flag J9 leaves at 0 is recovered: the `ACC_STATIC` on a synthetic/anonymous nested class. A non-static inner class captures its enclosing instance in a synthetic `this$0` field, so that field's *absence* means the class is static - an exact, build-independent tell. (An earlier `ACC_FINAL` heuristic only correlated on some builds: cross-variant validation found MHI2Q_CN anonymous classes that are static but not final.)
+One flag J9 leaves at 0 is recovered: the `ACC_STATIC` on a synthetic/anonymous nested class. A non-static inner class captures its enclosing instance in a synthetic `this$0` field, so that field's *absence* means the class is static - an exact, build-independent tell. (An earlier `ACC_FINAL` heuristic only correlated on some builds: cross-variant validation found anonymous classes that are static but not final.)
 
-Validated byte-for-byte against each firmware's own pre-romization jars, across US, JP and CN builds: **InnerClasses match exactly (100%)** (fw_util_commons 98/98, fw_util_tracing 209/209 per build).
+Where the original pre-romization jars are available, the reconstructed `InnerClasses` matches them byte-for-byte, and it holds across different ROM builds/regions.
 
 ### Exceptions attribute / `throws` clauses  (`src/jxe2jar.py`)
-J9 keeps each method's declared checked exceptions (`throw_exceptions`), which the converter used to drop - so decompiled methods showed no `throws`. The standard `Exceptions` attribute is now emitted from them (~10.5% of methods carry one). Validated byte-for-byte against the firmware jars (fw_util_commons 45/45, fw_util_tracing 117/117).
+J9 keeps each method's declared checked exceptions (`throw_exceptions`), which the converter used to drop - so decompiled methods showed no `throws`. The standard `Exceptions` attribute is now emitted from them, and matches the original jars byte-for-byte where those are available.
 
-*What is not recoverable:* a survey of the ROM optional-info flags shows the romizer strips `Signature` (generics - present on only 0.9%), `LocalVariableTable`/`LineNumberTable` (debug info / real variable names - 0%), runtime `Annotations` (0%) and `SourceFile` (0%). So generics stay erased and locals keep Vineflower's `jad` type-based names - those are a hard ROM limit, not a converter gap.
+*What is not recoverable:* a survey of the ROM optional-info flags shows the romizer strips `Signature` (generics), `LocalVariableTable`/`LineNumberTable` (debug info / real variable names), runtime `Annotations` and `SourceFile`. So generics stay erased and locals keep Vineflower's `jad` type-based names - a hard ROM limit, not a converter gap.
 
-### Post-decompile tooling
+## Decompilation Workflow
+
+The converter only produces `.class`/`.jar`; turning that into readable Java is a
+separate pipeline built around Vineflower (VF), with CFR as a fallback.
+
+1. **Convert** the JXE to a JAR:
+   ```
+   python3 src/jxe2jar.py input.jxe out.jar --skip-jdk <emptyfile>
+   ```
+   `--skip-jdk <emptyfile>` converts *every* ROM class, including the JDK / `java.*`
+   ones. Omit it to skip the JDK classes listed in `src/rt.classes`; add `--skip-libs
+   <dir>` to also skip anything already present in a `libs/` JAR.
+
+2. **Decompile** with Vineflower:
+   ```
+   tools/vineflower.sh out.jar out-src
+   ```
+   `vineflower.sh` picks the newest bundled `vineflower-*.jar`, runs it on a JDK 17+
+   (VF 1.12 targets class 61) while pointing `--include-runtime` at a bundled JDK 8
+   `rt.jar`, and uses the `jad` variable renamer (`tiny` crashes on these classes).
+   With the `InnerClasses` attribute now present, nested classes render inline in their
+   outer class instead of as separate `Outer$Inner.java` files.
+
+3. **CFR fallback** for the rare method Vineflower cannot structure:
+   ```
+   python3 tools/decompile_fallback.py out-src out.jar
+   ```
+   It finds any `// $VF: Couldn't be decompiled` stub and re-decompiles just that class
+   with CFR, whose control-flow analysis handles cases VF's `DomHelper` rejects.
+
+4. **Annotate** for readability (optional):
+   ```
+   python3 tools/annotate_constants.py out-src --apply    # inlined constant names
+   python3 tools/int2hex.py           out-src --apply     # hex bitmasks/flags
+   ```
+
+The output is readable Java with inline nested classes, `throws` clauses, symbolic
+constant names, and hex bitmasks.
+
+## Post-decompile Tooling
+
 - **`tools/annotate_constants.py`** - recover inlined `static final int` names. javac
-  inlines constants at the call site, but the names survive in registry interfaces, so
-  `getChoiceModel(402127)` becomes `getChoiceModel(/* NAV_MAP_SERVICELIST_GOOGLE_EARTH_CHOICE */ 402127)`
-  and `getText(871)` becomes `getText(/* TEXT_CONST_EVO_INPUTFIELD_DELETE_PROMPT */ 871)`.
-  Config-driven (one dict per accessor family); resolution is context-aware - model IDs
-  live in `*ModelBank` files (which beats enum-value collisions), `*_CHOICE`/`TEXT_` hints
-  and the caller's package domain pick the alias, and a per-accessor value floor drops the
-  small per-class indices. ~9100 call sites on MU1316-lsd.
-- **`tools/xref.py`** - bytecode cross-reference. `--callers <owner>[.member]` lists which
-  classes reference a class/method/field (precise, read from constant pools - not grep);
-  `--uses`/`--dump` for the other directions. Answers "who calls this?" during RE.
-- **`tools/decompile_fallback.py`** - re-decompiles any residual Vineflower stub
-  (`// $VF: Couldn't be decompiled`) with CFR and replaces the file.
-- **`tools/int2hex.py`** - decimal->hex for bitmask/flag/colour literals.
+  inlines a constant at the call site, so the decompiler only sees the number; the name
+  survives in the code's own registry interfaces, making `value -> name` recoverable. It
+  rewrites recognised accessor calls in place - e.g. on Audi MHI firmware:
+  ```
+  getChoiceModel(402127) -> getChoiceModel(/* NAV_MAP_SERVICELIST_GOOGLE_EARTH_CHOICE */ 402127)
+  getText(871)           -> getText(/* TEXT_CONST_EVO_INPUTFIELD_DELETE_PROMPT */ 871)
+  ```
+  It is config-driven (a `RULES` list, one dict per accessor family), so adapting it to a
+  different ROM's accessors/registries is a one-line change. Resolution is context-aware:
+  names in the accessor's own registry win (beating enum-value collisions), a
+  naming-convention hint and the caller's package domain pick the right alias, and a
+  per-accessor value floor drops the tiny per-class indices that are not real IDs.
+
+- **`tools/xref.py`** - a bytecode cross-reference index. It reads each class's constant
+  pool (not the decompiled text, so it is exact) and records who references what, to
+  answer "who uses this?":
+  ```
+  python3 tools/xref.py out.jar --callers de/.../MapInterface.validateGELicenseState
+  python3 tools/xref.py out.jar --uses    de/.../MapInterface     # what it references
+  python3 tools/xref.py out.jar --dump    xref.txt                # full reverse index
+  ```
+
+- **`tools/decompile_fallback.py`** - re-decompiles any residual Vineflower stub with CFR
+  and replaces the file (step 3 above). Needs `tools/cfr-*.jar`.
+
+- **`tools/int2hex.py`** - rewrites decimal literals to hex where hex reads better
+  (single-bit masks, all-ones masks, colour values), leaving ordinary numbers alone.
 
 *Not recoverable* (romizer-stripped, confirmed by an optional-flags survey): real local
-variable names (0% debug info - Vineflower's `jad` type-based names are the ceiling),
-generics on 99% of classes, runtime annotations, and log-level names (the `log(100000, ...)`
+variable names (no debug info survives - Vineflower's `jad` type-based names are the
+ceiling), generics, runtime annotations, and log-level names (the `log(100000, ...)`
 verbosity numbers have no `static final int` source constant, unlike model/text IDs).
 
 ### Field Parsing and Constants
@@ -165,8 +219,8 @@ as `// $VF: Couldn't be decompiled` stubs on J9-converted classes:
 - **VF 1.12.0** (not 1.11.2): 1.11.2's `ExitHelper.cleanUpUnreachableBlocks` NPEs on methods with
   unreachable blocks; fixed upstream in 1.12.0.
 
-Measured on `service.core.registration` bundle (455 classes): **1.11.2 `tiny` -> 399** broken files,
-**1.11.2 `jad` -> 1**, **1.12.0 `jad` -> 0**.
+On these classes the `tiny` renamer crashes on many files and older Vineflower leaves the
+odd stub; **`jad` on 1.12.0 decompiles them cleanly**, which is what `vineflower.sh` uses.
 
 ### Decompiling with Vineflower
 
