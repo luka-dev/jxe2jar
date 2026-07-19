@@ -43,6 +43,20 @@ Per class, the entry set mirrors javac: itself, its enclosing nest chain, its me
 
 Validated byte-for-byte against the firmware's own pre-romization jars (`fw_util_*`): **502/502 classes carrying InnerClasses match exactly (100%)**.
 
+### Exceptions attribute (`throws` clauses)
+J9 keeps each method's declared checked exceptions (`throw_exceptions`), which the converter used to drop - so decompiled methods showed no `throws`. The standard `Exceptions` attribute is now emitted from them (~10.5% of methods carry one). Validated byte-for-byte against the firmware jars (fw_util_commons 45/45, fw_util_tracing 117/117).
+
+*What is not recoverable:* a survey of the ROM optional-info flags shows the romizer strips `Signature` (generics - present on only 0.9%), `LocalVariableTable`/`LineNumberTable` (debug info / real variable names - 0%), runtime `Annotations` (0%) and `SourceFile` (0%). So generics stay erased and locals keep Vineflower's `jad` type-based names - those are a hard ROM limit, not a converter gap.
+
+### Recovering inlined constant names (post-decompile)
+`tools/annotate_model_ids.py` turns `getChoiceModel(402127)` back into
+`getChoiceModel(/* NAV_MAP_SERVICELIST_GOOGLE_EARTH_CHOICE */ 402127)`. javac inlines
+`static final int` model IDs at the call site, but the names survive in the
+`de/audi/atip/model/I*ModelBank` registry interfaces, so the value->name map is fully
+recoverable. Resolution is context-aware (model IDs live only in `*ModelBank` files,
+which beats enum-value collisions; `*_CHOICE` and the caller's package domain pick the
+right alias). On MU1316-lsd it annotates 7662 `get*Model(int)` call sites, 0 unresolved.
+
 ### Field Parsing and Constants
 - **Before:** Ignored ROM field constant values.
 - **Now:**
