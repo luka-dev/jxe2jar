@@ -28,7 +28,7 @@ import zipfile
 
 from bytecode import transform_bytecode
 from constpool import CONST, ConstPool
-from jxe import JXE, ReaderStream, WriterStream
+from jxe import JXE, ConstType, ReaderStream, WriterStream
 
 
 CLASS_FLAG_MASK = (
@@ -143,8 +143,136 @@ def _infer_classfile_major(romclass) -> int:
     return max(required, 46)
 
 
+def build_inner_meta(classes):
+    """Global map className -> (outer_class_name, simple_name, member_access_flags)
+    for every nested class, built from the *real* J9 ROM inner-class fields (no
+    name guessing). Members carry a real outer/name; anonymous, local and synthetic
+    (`Outer$1`) classes have outer=None and are recorded so the outer class can list
+    them (their InnerClasses entry gets outer=0, name=0 as javac emits)."""
+    meta = {}
+    children = {}
+    for rc in classes:
+        nested = rc.outer_class_name is not None or "$" in rc.class_name
+        if not nested:
+            continue
+        flags = rc.member_access_flags
+        # J9 leaves member flags at 0 for synthetic $N classes. javac records the
+        # *static* ones (e.g. Formatter$1) as ACC_STATIC in InnerClasses; those are
+        # ACC_FINAL in their own header, whereas a non-static synthetic/anonymous $N
+        # (e.g. JobQueue$1, own flags 0x20) is not - so ACC_FINAL is the tell.
+        if (
+            flags == 0
+            and rc.outer_class_name is None
+            and rc.simple_name is None
+            and rc.access_flags & 0x0010  # ACC_FINAL
+        ):
+            flags = 0x0008
+        meta[rc.class_name] = (rc.outer_class_name, rc.simple_name, flags)
+        # Name-based nest tree: `Outer$Inner` => Inner is a child of Outer. javac lists
+        # every nest member in the outer's InnerClasses, so we need this even when the
+        # ROM outerClassName is null (anonymous/synthetic).
+        if "$" in rc.class_name:
+            outer_name = rc.class_name.rsplit("$", 1)[0]
+            children.setdefault(outer_name, []).append(rc.class_name)
+    return meta, children
+
+
+def _classes_in_descriptor(descriptor):
+    """Yield every `Lpkg/Name;` internal class name inside a field/method descriptor."""
+    if not descriptor:
+        return
+    i = 0
+    while i < len(descriptor):
+        if descriptor[i] == "L":
+            end = descriptor.find(";", i)
+            if end == -1:
+                return
+            yield descriptor[i + 1 : end]
+            i = end + 1
+        else:
+            i += 1
+
+
+def _build_inner_classes_attr(romclass, const_pool, inner_meta, children):
+    """Reconstruct the InnerClasses attribute for one class from ROM metadata.
+
+    Like javac, a class lists an entry for: itself when nested, every nest member it
+    encloses, and every nested class it references in its constant pool. Each entry's
+    outer/name/flags come from that nested class's own ROM record, so modifiers are
+    exact (a nested interface keeps interface+abstract, etc.)."""
+    if not inner_meta:
+        return None
+    names = []
+    seen = set()
+
+    def consider(class_name):
+        if class_name in inner_meta and class_name not in seen:
+            seen.add(class_name)
+            names.append(class_name)
+
+    consider(romclass.class_name)
+    # Enclosing nest chain: Outer$Mid$Inner also lists Outer$Mid (and up).
+    chain = romclass.class_name
+    while "$" in chain:
+        chain = chain.rsplit("$", 1)[0]
+        consider(chain)
+    consider(romclass.superclass_name)  # a nested class may extend a sibling/member
+    for iface in romclass.interfaces:  # ...or implement one (stored outside the CP)
+        consider(getattr(iface, "name", None))
+    for member in children.get(romclass.class_name, ()):  # nest members we enclose
+        consider(member)
+    # A nested class is often mentioned only inside a descriptor (e.g. a synthetic
+    # `Ctor(Outer$1)` accessor parameter) rather than as a standalone CONSTANT_Class;
+    # javac still lists it, so scan every method/field signature for `L...;` types.
+    for method in romclass.methods:
+        for class_name in _classes_in_descriptor(getattr(method, "signature", None)):
+            consider(class_name)
+    for field in romclass.fields:
+        for class_name in _classes_in_descriptor(getattr(field, "signature", None)):
+            consider(class_name)
+    for const in romclass.constant_pool:
+        const_type = getattr(const, "type", None)
+        if const_type == ConstType.CLASS:
+            consider(getattr(const, "value", None))
+        elif const_type == ConstType.REF:
+            # field/method refs carry their owning class name; a nested class is
+            # often referenced only through these, not a standalone CLASS entry.
+            consider(getattr(const, "_class", None))
+            for class_name in _classes_in_descriptor(getattr(const, "descriptor", None)):
+                consider(class_name)
+
+    # Some refs are reconstructed during conversion (e.g. a call to a sibling's
+    # `<init>(Outer$1)`) and exist only in the *output* pool, not the J9 ROM one.
+    # Scan its UTF8 entries - every class name and descriptor javac would see is here.
+    for entry in const_pool.pool:
+        if not entry or entry[0] != CONST.UTF8:
+            continue
+        raw = entry[1]
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) <= 2:
+            continue
+        try:
+            text = raw[2:].decode("utf-8", "surrogatepass")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        consider(text)  # a bare class-name UTF8 (from a CONSTANT_Class)
+        for class_name in _classes_in_descriptor(text):  # or embedded in a descriptor
+            consider(class_name)
+    if not names:
+        return None
+
+    entries = []
+    for class_name in names:
+        outer, simple, flags = inner_meta[class_name]
+        inner_idx = const_pool.add(CONST.CLASS, class_name)
+        outer_idx = const_pool.add(CONST.CLASS, outer) if outer else 0
+        name_idx = const_pool.add(CONST.UTF8, simple) if simple else 0
+        entries.append((inner_idx, outer_idx, name_idx, flags & 0xFFFF))
+    attr_name_idx = const_pool.add(CONST.UTF8, "InnerClasses")
+    return {"attribute_name_index": attr_name_idx, "classes": entries}
+
+
 def dump_romclass(
-    stream, romclass, strip_synthetic: bool = False
+    stream, romclass, strip_synthetic: bool = False, inner_meta=None, children=None
 ) -> tuple[ConstPool, list]:  # pylint: disable=R0914, R0915
     """Dumps romclass."""
     stream.write_raw_bytes(b"\xca\xfe\xba\xbe")
@@ -302,6 +430,9 @@ def dump_romclass(
             }
         )
 
+    # Build InnerClasses (adds CP entries) BEFORE the pool is serialized.
+    inner_attr = _build_inner_classes_attr(romclass, const_pool, inner_meta, children or {})
+
     const_pool.write(stream)
 
     class_access_flags = romclass.access_flags & CLASS_FLAG_MASK
@@ -355,18 +486,33 @@ def dump_romclass(
             if attribute["attributes_count"]:
                 raise NotImplementedError()
 
-    stream.write_u16(0)
+    if inner_attr:
+        stream.write_u16(1)  # one class-level attribute: InnerClasses
+        stream.write_u16(inner_attr["attribute_name_index"])
+        stream.write_u32(2 + 8 * len(inner_attr["classes"]))
+        stream.write_u16(len(inner_attr["classes"]))
+        for inner_idx, outer_idx, name_idx, flags in inner_attr["classes"]:
+            stream.write_u16(inner_idx)
+            stream.write_u16(outer_idx)
+            stream.write_u16(name_idx)
+            stream.write_u16(flags)
+    else:
+        stream.write_u16(0)
 
     return method_info_list, const_pool
 
 
-def create_class(romclass, jarfile, strip_synthetic: bool = False) -> None:
+def create_class(
+    romclass, jarfile, strip_synthetic: bool = False, inner_meta=None, children=None
+) -> None:
     """Creates class"""
     class_name = romclass.class_name
     class_file = f"{class_name}.class"
     f_stream = io.BytesIO()
     stream = WriterStream(f_stream)
-    res = dump_romclass(stream, romclass, strip_synthetic=strip_synthetic)
+    res = dump_romclass(
+        stream, romclass, strip_synthetic=strip_synthetic, inner_meta=inner_meta, children=children
+    )
     stream.write()
     jarfile.writestr(class_file, f_stream.getvalue())
     return res
@@ -460,6 +606,9 @@ def _create_jar(
         skipped = 0
         written = 0
 
+        # Global nesting map from real ROM fields, used to reconstruct InnerClasses.
+        inner_meta, children = build_inner_meta(jxe.image.classes)
+
         for idx, romclass in enumerate(jxe.image.classes, 1):
             if _should_skip_class(romclass.class_name, skip_classes):
                 skipped += 1
@@ -468,7 +617,13 @@ def _create_jar(
 
             print(f"[{idx}/{total}] {romclass.class_name}")
             try:
-                create_class(romclass, jar_zipfile, strip_synthetic=strip_synthetic)
+                create_class(
+                    romclass,
+                    jar_zipfile,
+                    strip_synthetic=strip_synthetic,
+                    inner_meta=inner_meta,
+                    children=children,
+                )
                 written += 1
             except Exception as exc:  # pylint: disable=W0718
                 print("bad class, skip", romclass.class_name, ": ", exc)

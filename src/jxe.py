@@ -409,6 +409,11 @@ class J9ROMClass:
         class_count=None,
         ram_constant_pool_count=None,
         rom_constant_pool_count=None,
+        outer_class_name=None,
+        member_access_flags=0,
+        inner_class_names=None,
+        simple_name=None,
+        has_enclosing_method=False,
     ):
         self.minor = minor
         self.major = major
@@ -424,6 +429,13 @@ class J9ROMClass:
         self.class_count = class_count
         self.ram_constant_pool_count = ram_constant_pool_count
         self.rom_constant_pool_count = rom_constant_pool_count
+        # Real J9 ROM inner-class metadata (JVMS InnerClasses/EnclosingMethod source).
+        # J9 preserves these (unlike StackMapTable), so nesting is read, not guessed.
+        self.outer_class_name = outer_class_name  # enclosing class, or None if top-level
+        self.member_access_flags = member_access_flags  # original inner modifiers
+        self.inner_class_names = inner_class_names or []  # direct member inner classes
+        self.simple_name = simple_name  # inner simple name; None => anonymous
+        self.has_enclosing_method = has_enclosing_method  # true => anonymous/local
 
     @staticmethod
     def read_at(stream: BitArray, class_name: str, class_pointer: int, class_count=None):
@@ -463,25 +475,50 @@ class J9ROMClass:
             instance_size = stream.read_u32()  # noqa: F841
             instance_shape = stream.read_u32()  # noqa: F841
             cp_shape_description_pointer = stream.read_relative()  # noqa: F841
-            outer_class_name = stream.read_relative()  # noqa: F841
-            member_access_flags = stream.read_u32()  # noqa: F841
-            inner_class_count = stream.read_u32()  # noqa: F841
-            inner_classes_pointer = stream.read_relative()  # noqa: F841
-            major = stream.read_u16()
-            minor = stream.read_u16()
-            optional_flags = stream.read_u32()
-            optional_info_pointer = stream.read_relative()
 
-            if not optional_flags & 0x2000:
-                with StreamCursor(stream, optional_info_pointer):
-                    pass
-                    # source_filename = stream.read_sprr(optional_flags, 0x1)
-                    # generic_signature = stream.read_sprr(optional_flags, 0x2)
-                    # source_debug_ext = stream.read_sprr(optional_flags, 0x4)
-                    # annotation_info = stream.read_sprr(optional_flags, 0x8)
-                    # debug_info = stream.read_sprr(optional_flags, 0x10)
-                    # enclosing_method = stream.read_sprr(optional_flags, 0x40)
-                    # simple_name = stream.read_sprr(optional_flags, 0x80)
+            # --- inner-class metadata: layout verified against ground-truth jars.
+            # J9ROMClass here is (per u32 word after cpShapeDescription):
+            #   [+0] reserved SRP (unused here)   [+1] outerClassName SRP
+            #   [+2] memberAccessFlags            [+3] innerClassCount
+            #   [+4] innerClasses SRP             [+5] optionalFlags   [+6] optionalInfo SRP
+            # (An SRP whose stored i32 is 0 is NULL. The JVM version is not in this
+            # region; the converter recomputes it, so major/minor are placeholders.)
+            _reserved_srp = stream.read_u32()  # noqa: F841
+
+            occ_base = stream.get()
+            occ_raw = stream.read_i32()
+            outer_class_name = None
+            if occ_raw != 0:
+                with StreamCursor(stream, occ_base + occ_raw):
+                    outer_class_name = stream.read_string() or None
+
+            member_access_flags = stream.read_u32()
+            inner_class_count = stream.read_u32()
+            ic_base = stream.get()
+            ic_raw = stream.read_i32()
+            inner_class_names = []
+            if inner_class_count and ic_raw != 0:
+                with StreamCursor(stream, ic_base + ic_raw):
+                    for _ in range(inner_class_count):
+                        name = stream.read_string_ref()
+                        if name:
+                            inner_class_names.append(name)
+
+            optional_flags = stream.read_u32()
+            opt_base = stream.get()
+            opt_raw = stream.read_i32()
+            major, minor = 50, 0  # placeholders; real version recomputed downstream
+            # optional flag 0x40 => an EnclosingMethod record exists (true anonymous
+            # or local class); its absence on a nested class marks a synthetic one.
+            has_enclosing_method = bool(optional_flags & 0x40)
+
+            # simpleName (optional flag 0x80): its SRP sits at index = popcount of the
+            # optional flags below bit 0x80. Absent => the class is anonymous.
+            simple_name = None
+            if not (optional_flags & 0x2000) and (optional_flags & 0x80) and opt_raw != 0:
+                idx = bin(optional_flags & 0x7F).count("1")
+                with StreamCursor(stream, opt_base + opt_raw + 4 * idx):
+                    simple_name = stream.read_string_ref() or None
 
             base = stream.get()
             constant_pool_count = rom_constant_pool_count
@@ -509,7 +546,7 @@ class J9ROMClass:
                         J9ROMConstant(ConstType.INT, value=b"\x00\x00\x00\x00")
                     )
 
-        return J9ROMClass(
+        romclass = J9ROMClass(
             minor,
             major,
             class_name,
@@ -524,7 +561,13 @@ class J9ROMClass:
             class_count=class_count,
             ram_constant_pool_count=ram_constant_pool_count,
             rom_constant_pool_count=rom_constant_pool_count,
+            outer_class_name=outer_class_name,
+            member_access_flags=member_access_flags,
+            inner_class_names=inner_class_names,
+            simple_name=simple_name,
+            has_enclosing_method=has_enclosing_method,
         )
+        return romclass
 
 
 class J9ROMImage:

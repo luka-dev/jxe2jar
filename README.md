@@ -36,6 +36,13 @@ Whole-jar `-Xverify:all` (30004 classes) also surfaced three narrow correctness 
 ### Modified UTF-8 for string constants
 Classfile `CONSTANT_Utf8` uses JVM **Modified UTF-8** (JVMS 4.4.7), not standard UTF-8. The converter previously wrote `str.encode("utf-8", "surrogatepass")`, which differs in two loader-enforced ways: `U+0000` must be `0xC0 0x80` (never a bare `0x00`), and a supplementary char must be its UTF-16 surrogate pair as two 3-byte sequences (never a single 4-byte sequence). Plain ASCII/BMP text is identical, so this only bites strings carrying NULs or astral chars - e.g. `java.text.CollationRules`, whose rule string embeds `U+0000..U+001F`, was rejected with *"Illegal UTF8 string in constant pool"*. `_encode_utf8` now emits proper Modified UTF-8. (Surfaced only when converting the JDK/`java.*` classes too - pass `--skip-jdk <emptyfile>` to convert every ROM class, not just the firmware ones.)
 
+### InnerClasses reconstruction (from real ROM metadata)
+The `InnerClasses` attribute is rebuilt from the **actual J9 ROM fields**, not guessed from `$` names. J9 preserves per class (unlike `StackMapTable`): `outerClassName`, `memberAccessFlags`, the `innerClasses` list and, as optional info, `simpleName` (flag `0x80`) and an `EnclosingMethod` marker (flag `0x40`). `build_inner_meta` reads these (the header layout was corrected - `outerClassName` sits one word later than the old field map assumed), so each entry's outer/name/flags are exact - a nested interface keeps `interface+abstract`, a private member stays `private`, etc.
+
+Per class, the entry set mirrors javac: itself, its enclosing nest chain, its members, and every nested class it references. References are collected from the constant pool, the superclass/interfaces (which live outside the CP), all field/method descriptors, and - crucially - the *output* constant pool's UTF-8 entries, since some refs (e.g. a synthetic `<init>(Outer$1)` accessor call) are reconstructed during conversion and never appear as J9 ROM constants. Two flags J9 leaves at 0 are recovered: a synthetic **static** nested class is `ACC_FINAL` in its own header (vs a non-static `Outer$1`), and that is the tell.
+
+Validated byte-for-byte against the firmware's own pre-romization jars (`fw_util_*`): **502/502 classes carrying InnerClasses match exactly (100%)**.
+
 ### Field Parsing and Constants
 - **Before:** Ignored ROM field constant values.
 - **Now:**
