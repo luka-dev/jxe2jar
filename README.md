@@ -7,6 +7,7 @@ Tools and notes for converting **IBM J9/CDC JXE (rom.classes)** images back to s
 | Directory | Description |
 |-----------|-------------|
 | `src/` | Python implementation of **JXE -> JAR** conversion |
+| `tools/` | Decompile pipeline and post-decompile helpers: `vineflower.sh`, `annotate_constants.py`, `xref.py`, `decompile_fallback.py`, `int2hex.py` |
 | `test/custom_edgecases/` | Exhaustive edge-case suite (Java 1.2) to validate the converter |
 | `out/` | Conversion outputs and logs |
 | `vms/` | Virtualized environments for legacy tooling (XP VM -> WM5 emulator -> jar2jxe) |
