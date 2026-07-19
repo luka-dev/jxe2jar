@@ -50,18 +50,12 @@ _CORE = (
     r':\s*(?:[\w$]+\s*\.\s*)?'          # optional ClassName. prefix on else branch
     r'(?:class|array)\$[\w$]+'
 )
-# Two alternatives, wrapped tried first: a self-parenthesized ternary consumes its OWN
-# balanced parens; a bare ternary (e.g. a lone call argument) consumes none - so we never
-# eat the enclosing call's paren, which glued `foo(` onto the class literal.
-# group(1) = FQN of the wrapped form, group(2) = FQN of the bare form.
-# The wrapped `(` is only the ternary's own parenthesis when it is NOT a call/index
-# paren - i.e. not preceded by an identifier char, `)` or `]`. Otherwise `foo(TERNARY)`
-# and a genuine `(TERNARY)` are locally identical and we would eat the call's paren.
-TERNARY_PATTERN = re.compile(
-    r'(?<![\w$)\]])\(\s*' + (_CORE % r'([^"]+)') + r'\s*\)'
-    r'|' + (_CORE % r'([^"]+)'),
-    re.DOTALL
-)
+# Match ONLY the bare conditional, never any surrounding parentheses. Consuming a
+# wrapping `(` ... `)` is unsafe: a lone ternary and one wrapping a call/keyword operand
+# (`foo(TERNARY)`, `synchronized (TERNARY)`) are locally identical, so eating "its" parens
+# eats the call's / statement's. Leaving a redundant `(Foo.class)` behind is valid Java;
+# eating a required paren is not. group(1) = the FQN.
+TERNARY_PATTERN = re.compile(_CORE % r'([^"]+)', re.DOTALL)
 
 # Match synthetic fields: static Class class$pkg$Name; or static Class array$Ljava$...;
 # Also matches with visibility modifiers or final
@@ -138,7 +132,7 @@ def fix_file(filepath):
     def replace_ternary(m):
         nonlocal count
         count += 1
-        fqn = m.group(1) if m.group(1) is not None else m.group(2)
+        fqn = m.group(1)
         return fqn_to_class_literal(fqn)
 
     new_content = TERNARY_PATTERN.sub(replace_ternary, content)
