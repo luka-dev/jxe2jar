@@ -399,6 +399,61 @@ python3 tools/fix_class_literals.py out/MU1316-lsd-vf/ --apply -v
 ```
 Works on both CFR and Vineflower output.
 
+### Post-processing: annotate_constants.py
+
+javac inlines `static final int` constants at the call site, so the decompiler only sees
+the raw number - `getChoiceModel(402127)`, `getText(871)`. The names still exist in the
+code's own registry interfaces, so `value -> name` is recoverable. This script indexes
+every `int NAME = <value>;` in the tree, then annotates each recognised accessor call in
+place:
+
+```java
+getChoiceModel(402127)  ->  getChoiceModel(/* NAV_MAP_SERVICELIST_GOOGLE_EARTH_CHOICE */ 402127)
+getText(871)            ->  getText(/* TEXT_CONST_EVO_INPUTFIELD_DELETE_PROMPT */ 871)
+```
+
+Resolution is context-aware to beat the two ambiguities of a raw value lookup:
+- **Registry filter** - a small value matches hundreds of unrelated enum constants, so a
+  name defined in the accessor's own registry wins (model IDs live in `*ModelBank` files).
+- **Name-convention hint** - `*_CHOICE` for choices, `TEXT_`/`TXT_` for text.
+- **Package domain** - the caller's package (`navi`, `media`, ...) picks the right alias.
+- **Value floor** - per-accessor minimum below which the argument is too collision-prone
+  to annotate (drops the tiny per-class indices that are not real IDs).
+
+The accessor families are a config-driven `RULES` list (one dict per family), so adapting
+it to a different ROM's accessors/registries is a one-line change.
+
+```sh
+# Dry-run (report only)
+python3 tools/annotate_constants.py out/MU1316-lsd-vf/
+
+# Apply in-place
+python3 tools/annotate_constants.py out/MU1316-lsd-vf/ --apply
+
+# Export a value->name markdown table
+python3 tools/annotate_constants.py out/MU1316-lsd-vf/ --table model_id_map.md
+```
+
+The example names above are Audi-specific; on other firmware the tool still works once
+`RULES` names that ROM's accessors. Works on both CFR and Vineflower output.
+
+### Post-processing: decompile_fallback.py
+
+Vineflower occasionally emits a `// $VF: Couldn't be decompiled` stub for a method whose
+control flow its `DomHelper` cannot structure (a genuine VF bug). This script scans the
+decompiled tree for such stubs and, for each affected class, re-decompiles it from the JAR
+with CFR (whose recovery handles those cases) and replaces the `.java` file.
+
+```sh
+# Dry-run (list the stubs it would replace)
+python3 tools/decompile_fallback.py out/MU1316-lsd-vf/ out/MU1316-lsd.jar --dry-run
+
+# Apply - re-decompile each stubbed class with CFR
+python3 tools/decompile_fallback.py out/MU1316-lsd-vf/ out/MU1316-lsd.jar
+```
+
+Needs `tools/cfr-*.jar`. Run it right after Vineflower, before the annotate/hex passes.
+
 ### Post-processing: int2hex.py
 
 Decompilers output all integer constants in decimal. Values that are bitmasks, flags, or bit patterns are more readable in hex (e.g. `6291488` -> `0x600020`). The `int2hex.py` script heuristically identifies these and converts them.
