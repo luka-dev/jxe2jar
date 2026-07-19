@@ -7,7 +7,7 @@ Tools and notes for converting **IBM J9/CDC JXE (rom.classes)** images back to s
 | Directory | Description |
 |-----------|-------------|
 | `src/` | Python implementation of **JXE -> JAR** conversion |
-| `tools/` | Decompile pipeline and post-decompile helpers: `vineflower.sh`, `cfr.sh`, `annotate_constants.py`, `xref.py`, `decompile_fallback.py`, `int2hex.py` |
+| `tools/` | Decompile pipeline and post-decompile helpers: `vineflower.sh`, `cfr.sh`, `annotate_constants.py`, `xref.py`, `decompile_fallback.py`, `fix_vf_artifacts.py`, `int2hex.py` |
 | `test/custom_edgecases/` | Exhaustive edge-case suite (Java 1.2) to validate the converter |
 | `out/` | Conversion outputs and logs |
 | `vms/` | Virtualized environments for legacy tooling (XP VM -> WM5 emulator -> jar2jxe) |
@@ -58,6 +58,21 @@ One flag J9 leaves at 0 is recovered: the `ACC_STATIC` on a synthetic/anonymous 
 
 Where the original pre-romization jars are available, the reconstructed `InnerClasses` matches them byte-for-byte, and it holds across different ROM builds/regions.
 
+### EnclosingMethod attribute  (`src/jxe2jar.py`, `src/jxe.py`)
+Anonymous and local classes also carry a J9 `EnclosingObject` record (optional flag `0x40`):
+`{ classRefCPIndex, nameAndSignature }`. It is read into the enclosing class and, when the ROM
+kept it, the enclosing method's name+descriptor, then emitted as the JVMS 4.7.7 `EnclosingMethod`
+attribute (`class_index` + optional `method_index` NameAndType).
+
+This matters for decompilation: without it a decompiler treats every inner class as an independent
+top-level class, so anonymous classes come out as separate `Outer$N.java` files, synthetic
+`access$NNN` accessors get stripped from the outer class but are still called from the inners
+(unresolved references), and private-inner constructors keep their synthetic disambiguator
+argument (wrong arity). With `EnclosingMethod` present, Vineflower inlines anonymous classes into
+their enclosing method and resolves all of these. One residual Vineflower artifact from the
+inlining (`<unrepresentable>` on a nested anonymous class's synthetic outer-`this` field) is
+cleaned up by `tools/fix_vf_artifacts.py`.
+
 ### Exceptions attribute / `throws` clauses  (`src/jxe2jar.py`)
 J9 keeps each method's declared checked exceptions (`throw_exceptions`), which the converter used to drop - so decompiled methods showed no `throws`. The standard `Exceptions` attribute is now emitted from them, and matches the original jars byte-for-byte where those are available.
 
@@ -93,8 +108,9 @@ separate pipeline built around Vineflower (VF), with CFR as a fallback.
    It finds any `// $VF: Couldn't be decompiled` stub and re-decompiles just that class
    with CFR, whose control-flow analysis handles cases VF's `DomHelper` rejects.
 
-4. **Annotate** for readability (optional):
+4. **Repair inlining artifacts** and **annotate** for readability:
    ```
+   python3 tools/fix_vf_artifacts.py  out-src --apply     # <unrepresentable> -> Object
    python3 tools/annotate_constants.py out-src --apply    # inlined constant names
    python3 tools/int2hex.py           out-src --apply     # hex bitmasks/flags
    ```
