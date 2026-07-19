@@ -36,20 +36,30 @@ from pathlib import Path
 #   (array$Ljava$lang$Object == null ? (array$Ljava$lang$Object = class$("[Ljava.lang.Object;")) : array$Ljava$lang$Object)
 #   Without outer parens in field initializers:
 #     Foo.class$pkg$Name == null ? (Foo.class$pkg$Name = class$("pkg.Name")) : Foo.class$pkg$Name
-# Captures group(1) = the string argument to class$(), e.g. "de.audi.app.Foo"
-TERNARY_PATTERN = re.compile(
-    r'\(?\s*'
+# The core conditional (no surrounding parens). "%s" is where the FQN capture goes.
+#   class$X == null ? (class$X = class$("fqn")) : class$X
+_CORE = (
     r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on field ref
     r'(?:class|array)\$[\w$]+\s*==\s*null\s*'
     r'\?\s*\(\s*'
     r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on assignment
     r'(?:class|array)\$[\w$]+\s*=\s*'
     r'(?:[\w$]+\s*\.\s*)?'              # optional ClassName. prefix on class$() call
-    r'class\$\(\s*"([^"]+)"\s*\)'       # class$("fqn") - capture the FQN
+    r'class\$\(\s*"%s"\s*\)'            # class$("fqn") - FQN capture goes here
     r'\s*\)\s*'
     r':\s*(?:[\w$]+\s*\.\s*)?'          # optional ClassName. prefix on else branch
-    r'(?:class|array)\$[\w$]+\s*'
-    r'\)?',
+    r'(?:class|array)\$[\w$]+'
+)
+# Two alternatives, wrapped tried first: a self-parenthesized ternary consumes its OWN
+# balanced parens; a bare ternary (e.g. a lone call argument) consumes none - so we never
+# eat the enclosing call's paren, which glued `foo(` onto the class literal.
+# group(1) = FQN of the wrapped form, group(2) = FQN of the bare form.
+# The wrapped `(` is only the ternary's own parenthesis when it is NOT a call/index
+# paren - i.e. not preceded by an identifier char, `)` or `]`. Otherwise `foo(TERNARY)`
+# and a genuine `(TERNARY)` are locally identical and we would eat the call's paren.
+TERNARY_PATTERN = re.compile(
+    r'(?<![\w$)\]])\(\s*' + (_CORE % r'([^"]+)') + r'\s*\)'
+    r'|' + (_CORE % r'([^"]+)'),
     re.DOTALL
 )
 
@@ -128,7 +138,7 @@ def fix_file(filepath):
     def replace_ternary(m):
         nonlocal count
         count += 1
-        fqn = m.group(1)
+        fqn = m.group(1) if m.group(1) is not None else m.group(2)
         return fqn_to_class_literal(fqn)
 
     new_content = TERNARY_PATTERN.sub(replace_ternary, content)
