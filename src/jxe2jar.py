@@ -156,15 +156,18 @@ def build_inner_meta(classes):
         if not nested:
             continue
         flags = rc.member_access_flags
-        # J9 leaves member flags at 0 for synthetic $N classes. javac records the
-        # *static* ones (e.g. Formatter$1) as ACC_STATIC in InnerClasses; those are
-        # ACC_FINAL in their own header, whereas a non-static synthetic/anonymous $N
-        # (e.g. JobQueue$1, own flags 0x20) is not - so ACC_FINAL is the tell.
+        # J9 leaves member flags at 0 for synthetic/anonymous $N classes; javac records
+        # the *static* ones as ACC_STATIC in InnerClasses. A class is static-in-context
+        # iff it does not capture the enclosing instance, and javac marks that capture
+        # with a synthetic `this$N` field - its absence is the reliable, build-independent
+        # tell (ACC_FINAL only correlated on some firmware variants; `this$0` is exact).
         if (
             flags == 0
             and rc.outer_class_name is None
             and rc.simple_name is None
-            and rc.access_flags & 0x0010  # ACC_FINAL
+            and not any(
+                getattr(f, "name", "").startswith("this$") for f in rc.fields
+            )
         ):
             flags = 0x0008
         meta[rc.class_name] = (rc.outer_class_name, rc.simple_name, flags)
