@@ -7,7 +7,7 @@ Tools and notes for converting **IBM J9/CDC JXE (rom.classes)** images back to s
 | Directory | Description |
 |-----------|-------------|
 | `src/` | Python implementation of **JXE -> JAR** conversion |
-| `tools/` | Decompile pipeline and post-decompile helpers: `vineflower.sh`, `annotate_constants.py`, `xref.py`, `decompile_fallback.py`, `int2hex.py` |
+| `tools/` | Decompile pipeline and post-decompile helpers: `vineflower.sh`, `cfr.sh`, `annotate_constants.py`, `xref.py`, `decompile_fallback.py`, `int2hex.py` |
 | `test/custom_edgecases/` | Exhaustive edge-case suite (Java 1.2) to validate the converter |
 | `out/` | Conversion outputs and logs |
 | `vms/` | Virtualized environments for legacy tooling (XP VM -> WM5 emulator -> jar2jxe) |
@@ -313,6 +313,17 @@ Vineflower can only add `@Override` annotations and resolve generics when it kno
 ### Decompiling with CFR
 
 ```sh
+tools/cfr.sh out/MU1316-lsd.jar out/MU1316-lsd-cfr
+```
+
+`cfr.sh` picks the newest bundled `cfr-*.jar`, applies the option set below, and hands
+CFR the JDK 8 `rt.jar` plus any `libs/*.jar` as `--extraclasspath` so it can resolve
+`@Override`/generics against the target's stdlib.
+
+<details>
+<summary>Equivalent manual command</summary>
+
+```sh
 java -jar tools/cfr-0.152.jar out/MU1316-lsd.jar \
   --outputdir out/MU1316-lsd-cfr \
   --silent true \
@@ -345,8 +356,11 @@ java -jar tools/cfr-0.152.jar out/MU1316-lsd.jar \
   --tidymonitors true \
   --labelledblocks true \
   --usenametable true \
-  --eclipse true
+  --eclipse true \
+  --extraclasspath path/to/jdk8/jre/lib/rt.jar
 ```
+
+</details>
 
 Key options explained:
 - `--sugar*` / `--decode*` - recover high-level constructs (enums, asserts, boxing, lambdas, switches, try-with-resources, for-each)
