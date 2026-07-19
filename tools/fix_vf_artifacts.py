@@ -22,10 +22,21 @@ import sys
 TOKEN = "<unrepresentable>"
 
 # Vineflower's `jad` renamer derives a variable name by lower-casing its type, which
-# collides with a reserved word for a few types (e.g. `Void` -> `void`), producing an
-# illegal identifier like `accept(Void void)`. These are unused synthetic parameters, so
-# suffixing the identifier with `_` in the declaration makes the file legal Java.
-KEYWORD_PARAM = re.compile(r"\b(Void|Class|Enum)\s+(void|class|enum)\b")
+# collides with a reserved word when the type lower-cases to one (`Void`->void,
+# `Else`->else, `Final`->final, `If`->if, ...), producing an illegal identifier like
+# `accept(Void void)` or `ElseIterator(..., Else else)`. Suffix the identifier with `_` in
+# its declaration. The lookahead `[=;,)]` keeps this to declaration/parameter positions
+# (so a real modifier keyword like `final int` is never touched).
+_JAVA_KEYWORDS = (
+    "abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|default|do|"
+    "double|else|enum|extends|final|finally|float|for|goto|if|implements|import|instanceof|"
+    "int|interface|long|native|new|package|private|protected|public|return|short|static|"
+    "strictfp|super|switch|synchronized|this|throw|throws|transient|try|void|volatile|while|"
+    "true|false|null"
+)
+KEYWORD_PARAM = re.compile(
+    r"\b([A-Z][A-Za-z0-9_$]*)\s+(" + _JAVA_KEYWORDS + r")\b(?=\s*[=;,)])"
+)
 
 # Vineflower sometimes emits a cast as a self-duplicated intersection type,
 # `(Map & Map)x`, which is a valid but pointless intersection of a type with itself.

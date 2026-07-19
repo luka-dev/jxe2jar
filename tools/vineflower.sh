@@ -31,6 +31,14 @@ if [ ! -f "$RTJAR" ]; then
   exit 1
 fi
 
+# Keep synthetic members (this$0, val$, access$NNN, synthetic ctors) when the input is
+# NOT romized and has full inner-class attributes but VF still leaves some inner/anonymous
+# classes un-inlined: stripping synthetics then dangles their references. Set
+# VF_KEEP_SYNTHETIC=1 for such inputs (e.g. the eso OSGi bundles). Romized input converted
+# with our EnclosingMethod attribute inlines cleanly, so it keeps the default (strip).
+REMOVE_SYNTHETIC=true
+[ -n "$VF_KEEP_SYNTHETIC" ] && REMOVE_SYNTHETIC=false
+
 # All --flag=value options first
 args=(
   "$JAVA_BIN" -Xmx30g -jar "$VF_JAR"
@@ -42,7 +50,7 @@ args=(
   --decompile-java4=true
   --decompile-switch-expressions=true
   --remove-bridge=true
-  --remove-synthetic=true
+  "--remove-synthetic=$REMOVE_SYNTHETIC"
   --remove-empty-try-catch=true
   --remove-getclass=true
   --hide-default-constructor=true
