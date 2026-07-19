@@ -45,13 +45,23 @@ KEYWORD_PARAM = re.compile(
 # syntax that some downstream parsers reject.
 DUP_INTERSECTION = re.compile(r"\(\s*([A-Za-z_$][\w$.]*)\s*&\s*\1\s*\)")
 
+# Generics are stripped, so a raw `List.toArray(new T[n])` is typed `Object[]` and fails to
+# assign to a `T[]`. The runtime result IS a `T[]`, so an explicit `(T[])` cast is always
+# correct (redundant, not wrong, when the collection was actually generic). Only the
+# assignment/return forms with a simple dotted receiver are matched; an existing cast makes
+# the receiver group start with `(`, so it is skipped (no double cast).
+TOARRAY_CAST = re.compile(
+    r"(?<![=!<>+\-*/&|^%~])(=|\breturn)(\s+)([A-Za-z_][\w.$]*)\.toArray\(\s*new\s+([\w.$]+)\["
+)
+
 
 def fix_text(text):
     n = text.count(TOKEN)
     text = text.replace(TOKEN, "Object")
     text, k = KEYWORD_PARAM.subn(lambda m: f"{m.group(1)} {m.group(2)}_", text)
     text, d = DUP_INTERSECTION.subn(r"(\1)", text)
-    return text, n + k + d
+    text, a = TOARRAY_CAST.subn(r"\1\2(\4[]) \3.toArray(new \4[", text)
+    return text, n + k + d + a
 
 
 def main():
