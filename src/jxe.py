@@ -414,6 +414,9 @@ class J9ROMClass:
         inner_class_names=None,
         simple_name=None,
         has_enclosing_method=False,
+        enclosing_class=None,
+        enclosing_method_name=None,
+        enclosing_method_sig=None,
     ):
         self.minor = minor
         self.major = major
@@ -436,6 +439,10 @@ class J9ROMClass:
         self.inner_class_names = inner_class_names or []  # direct member inner classes
         self.simple_name = simple_name  # inner simple name; None => anonymous
         self.has_enclosing_method = has_enclosing_method  # true => anonymous/local
+        # EnclosingMethod attribute source: enclosing class + optional method NameAndType.
+        self.enclosing_class = enclosing_class
+        self.enclosing_method_name = enclosing_method_name
+        self.enclosing_method_sig = enclosing_method_sig
 
     @staticmethod
     def read_at(stream: BitArray, class_name: str, class_pointer: int, class_count=None):
@@ -520,6 +527,29 @@ class J9ROMClass:
                 with StreamCursor(stream, opt_base + opt_raw + 4 * idx):
                     simple_name = stream.read_string_ref() or None
 
+            # EnclosingMethod (optional flag 0x40): its SRP sits at index = popcount of
+            # the optional flags below bit 0x40 and points at a J9EnclosingObject:
+            #   { U32 classRefCPIndex; SRP nameAndSignature }
+            # nameAndSignature (or NULL) -> J9ROMNameAndSignature { SRP name; SRP sig }.
+            # The class is resolved from the ROM constant pool once it is parsed below.
+            enclosing_class_cp_index = None
+            enclosing_method_name = None
+            enclosing_method_sig = None
+            if (optional_flags & 0x40) and opt_raw != 0:
+                em_i = bin(optional_flags & 0x3F).count("1")
+                with StreamCursor(stream, opt_base + opt_raw + 4 * em_i):
+                    eo_base = stream.get()
+                    eo_srp = stream.read_i32()
+                    if eo_srp != 0:
+                        with StreamCursor(stream, eo_base + eo_srp):
+                            enclosing_class_cp_index = stream.read_u32()
+                            nas_base = stream.get()
+                            nas_srp = stream.read_i32()
+                            if nas_srp != 0:
+                                with StreamCursor(stream, nas_base + nas_srp):
+                                    enclosing_method_name = stream.read_string_ref() or None
+                                    enclosing_method_sig = stream.read_string_ref() or None
+
             base = stream.get()
             constant_pool_count = rom_constant_pool_count
             constant_pool = []
@@ -546,6 +576,21 @@ class J9ROMClass:
                         J9ROMConstant(ConstType.INT, value=b"\x00\x00\x00\x00")
                     )
 
+            # Resolve the enclosing class from the parsed ROM constant pool. Fall back
+            # to outerClassName, then to the JVM-mandated Outer$N naming (the enclosing
+            # class of an anonymous class is unambiguously the part before the last '$').
+            enclosing_class = None
+            if enclosing_class_cp_index is not None and (
+                0 <= enclosing_class_cp_index < len(constant_pool)
+            ):
+                ec = constant_pool[enclosing_class_cp_index]
+                if ec.type == ConstType.CLASS and ec.value:
+                    enclosing_class = ec.value
+            if enclosing_class is None and (optional_flags & 0x40):
+                enclosing_class = outer_class_name or (
+                    class_name.rsplit("$", 1)[0] if "$" in class_name else None
+                )
+
         romclass = J9ROMClass(
             minor,
             major,
@@ -566,6 +611,9 @@ class J9ROMClass:
             inner_class_names=inner_class_names,
             simple_name=simple_name,
             has_enclosing_method=has_enclosing_method,
+            enclosing_class=enclosing_class,
+            enclosing_method_name=enclosing_method_name,
+            enclosing_method_sig=enclosing_method_sig,
         )
         return romclass
 

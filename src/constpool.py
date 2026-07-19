@@ -305,6 +305,17 @@ class ConstPool:
             self.pool.append([CONST.UTF8, struct.pack(">H", len(value)) + value])
             return index + 1
 
+        if value_type == CONST.NAMEANDTYPE:
+            # value = (name, descriptor); the leading str-encode skipped it (a tuple).
+            name, descriptor = value
+            name_idx = self.add(CONST.UTF8, name)
+            desc_idx = self.add(CONST.UTF8, descriptor)
+            index = len(self.pool)
+            self.pool.append(
+                [CONST.NAMEANDTYPE, struct.pack(">H", name_idx), struct.pack(">H", desc_idx)]
+            )
+            return index + 1
+
         if value_type == CONST.LONG:
             index = len(self.pool)
             self.pool.append([CONST.LONG, struct.pack(">II", *value)])

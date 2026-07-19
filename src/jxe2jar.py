@@ -460,6 +460,26 @@ def dump_romclass(
     # Build InnerClasses (adds CP entries) BEFORE the pool is serialized.
     inner_attr = _build_inner_classes_attr(romclass, const_pool, inner_meta, children or {})
 
+    # EnclosingMethod (JVMS 4.7.7): present on anonymous/local classes so a decompiler
+    # can tie them to their enclosing class (and method, when the ROM kept it). Without
+    # it Vineflower treats each inner as an independent top-level class and cannot inline
+    # anonymous classes or resolve their synthetic access$/constructor references.
+    enclosing_attr = None
+    if getattr(romclass, "has_enclosing_method", False) and getattr(
+        romclass, "enclosing_class", None
+    ):
+        method_index = 0
+        if romclass.enclosing_method_name and romclass.enclosing_method_sig:
+            method_index = const_pool.add(
+                CONST.NAMEANDTYPE,
+                (romclass.enclosing_method_name, romclass.enclosing_method_sig),
+            )
+        enclosing_attr = {
+            "attribute_name_index": const_pool.add(CONST.UTF8, "EnclosingMethod"),
+            "class_index": const_pool.add(CONST.CLASS, romclass.enclosing_class),
+            "method_index": method_index,
+        }
+
     const_pool.write(stream)
 
     class_access_flags = romclass.access_flags & CLASS_FLAG_MASK
@@ -520,8 +540,8 @@ def dump_romclass(
             if attribute["attributes_count"]:
                 raise NotImplementedError()
 
+    stream.write_u16(bool(inner_attr) + bool(enclosing_attr))
     if inner_attr:
-        stream.write_u16(1)  # one class-level attribute: InnerClasses
         stream.write_u16(inner_attr["attribute_name_index"])
         stream.write_u32(2 + 8 * len(inner_attr["classes"]))
         stream.write_u16(len(inner_attr["classes"]))
@@ -530,8 +550,11 @@ def dump_romclass(
             stream.write_u16(outer_idx)
             stream.write_u16(name_idx)
             stream.write_u16(flags)
-    else:
-        stream.write_u16(0)
+    if enclosing_attr:
+        stream.write_u16(enclosing_attr["attribute_name_index"])
+        stream.write_u32(4)
+        stream.write_u16(enclosing_attr["class_index"])
+        stream.write_u16(enclosing_attr["method_index"])
 
     return method_info_list, const_pool
 
