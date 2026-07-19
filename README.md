@@ -48,14 +48,26 @@ J9 keeps each method's declared checked exceptions (`throw_exceptions`), which t
 
 *What is not recoverable:* a survey of the ROM optional-info flags shows the romizer strips `Signature` (generics - present on only 0.9%), `LocalVariableTable`/`LineNumberTable` (debug info / real variable names - 0%), runtime `Annotations` (0%) and `SourceFile` (0%). So generics stay erased and locals keep Vineflower's `jad` type-based names - those are a hard ROM limit, not a converter gap.
 
-### Recovering inlined constant names (post-decompile)
-`tools/annotate_model_ids.py` turns `getChoiceModel(402127)` back into
-`getChoiceModel(/* NAV_MAP_SERVICELIST_GOOGLE_EARTH_CHOICE */ 402127)`. javac inlines
-`static final int` model IDs at the call site, but the names survive in the
-`de/audi/atip/model/I*ModelBank` registry interfaces, so the value->name map is fully
-recoverable. Resolution is context-aware (model IDs live only in `*ModelBank` files,
-which beats enum-value collisions; `*_CHOICE` and the caller's package domain pick the
-right alias). On MU1316-lsd it annotates 7662 `get*Model(int)` call sites, 0 unresolved.
+### Post-decompile tooling
+- **`tools/annotate_constants.py`** - recover inlined `static final int` names. javac
+  inlines constants at the call site, but the names survive in registry interfaces, so
+  `getChoiceModel(402127)` becomes `getChoiceModel(/* NAV_MAP_SERVICELIST_GOOGLE_EARTH_CHOICE */ 402127)`
+  and `getText(871)` becomes `getText(/* TEXT_CONST_EVO_INPUTFIELD_DELETE_PROMPT */ 871)`.
+  Config-driven (one dict per accessor family); resolution is context-aware - model IDs
+  live in `*ModelBank` files (which beats enum-value collisions), `*_CHOICE`/`TEXT_` hints
+  and the caller's package domain pick the alias, and a per-accessor value floor drops the
+  small per-class indices. ~9100 call sites on MU1316-lsd.
+- **`tools/xref.py`** - bytecode cross-reference. `--callers <owner>[.member]` lists which
+  classes reference a class/method/field (precise, read from constant pools - not grep);
+  `--uses`/`--dump` for the other directions. Answers "who calls this?" during RE.
+- **`tools/decompile_fallback.py`** - re-decompiles any residual Vineflower stub
+  (`// $VF: Couldn't be decompiled`) with CFR and replaces the file.
+- **`tools/int2hex.py`** - decimal->hex for bitmask/flag/colour literals.
+
+*Not recoverable* (romizer-stripped, confirmed by an optional-flags survey): real local
+variable names (0% debug info - Vineflower's `jad` type-based names are the ceiling),
+generics on 99% of classes, runtime annotations, and log-level names (the `log(100000, ...)`
+verbosity numbers have no `static final int` source constant, unlike model/text IDs).
 
 ### Field Parsing and Constants
 - **Before:** Ignored ROM field constant values.
