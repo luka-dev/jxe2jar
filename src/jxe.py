@@ -80,14 +80,14 @@ class J9ROMField:
         access_flag,
         const_value=None,
         const_value2=None,
-        const_value3=None,
+        generic_signature=None,
     ):
         self.name = name
         self.signature = signature
         self.access_flag = access_flag
         self.const_value = const_value
         self.const_value2 = const_value2
-        self.const_value3 = const_value3
+        self.generic_signature = generic_signature  # field-level Signature (0x40000000), or None
 
     @staticmethod
     def read(stream: BitArray):
@@ -97,14 +97,19 @@ class J9ROMField:
         # print(name + signature)
         access_flags = stream.read_u32()
 
-        const_value = const_value2 = const_value3 = None
+        const_value = const_value2 = None
+        generic_signature = None
         if access_flags & 0x400000:
             const_value = stream.read_u32()
             if access_flags & 0x40000:
                 const_value2 = stream.read_u32()
 
         if access_flags & 0x40000000:
-            const_value3 = stream.read_u32()
+            # J9FieldFlagHasGenericSignature: self-relative SRP to the field's generic
+            # Signature UTF8 (JVMS 4.7.9). Confirmed: all such fields resolve to valid
+            # field signatures (e.g. GMap<Class,GList<EventSubscriber>>). The old code
+            # read this same 4-byte word as an unused "const_value3" - alignment intact.
+            generic_signature = stream.read_string_ref() or None
 
         return J9ROMField(
             name,
@@ -112,7 +117,7 @@ class J9ROMField:
             access_flags,
             const_value=const_value,
             const_value2=const_value2,
-            const_value3=const_value3,
+            generic_signature=generic_signature,
         )
 
 
@@ -161,6 +166,7 @@ class J9ROMMethod:
         bytecode,
         catch_exceptions,
         throw_exceptions,
+        generic_signature=None,
     ):
         self.name = name
         self.signature = signature
@@ -171,6 +177,7 @@ class J9ROMMethod:
         self.bytecode = bytecode
         self.catch_exceptions = catch_exceptions
         self.throw_exceptions = throw_exceptions
+        self.generic_signature = generic_signature  # method-level Signature (0x02000000), or None
 
     @staticmethod
     def read(stream: BitArray):
@@ -182,6 +189,7 @@ class J9ROMMethod:
         has_exception_info = modifier & 0x00020000
         add_four1 = modifier & 0x00010000  # pylint: disable=unused-variable
         max_stack = stream.read_u16()
+        generic_signature = None  # resolved from the 0x02000000 SRP below
         if modifier & 0x100:
             base = stream.get()  # noqa: F841
             native_arg_count = stream.read_u8()  # noqa: F841
@@ -231,8 +239,11 @@ class J9ROMMethod:
             bytecode_size *= 4
             bytecode = stream.read_bytes(bytecode_size)
             if modifier & 0x02000000:
-                # J9 stores an extra u32 after bytecode for some methods.
-                stream.read_bytes(4)
+                # J9AccMethodHasGenericSignature: the u32 after bytecode is a self-
+                # relative SRP to the method's generic Signature UTF8 (JVMS 4.7.9).
+                # read_string_ref consumes exactly that 4-byte SRP (alignment intact,
+                # same as the old read_bytes(4)) and follows it to the string.
+                generic_signature = stream.read_string_ref() or None
             stream.set((stream.get() + 3) & ~3)
             if has_exception_info:
                 caught_exception_count = stream.read_u16()
@@ -262,6 +273,7 @@ class J9ROMMethod:
             bytecode,
             caught_exceptions,
             thrown_exceptions,
+            generic_signature=generic_signature,
         )
 
 
@@ -527,6 +539,18 @@ class J9ROMClass:
                 with StreamCursor(stream, opt_base + opt_raw + 4 * idx):
                     simple_name = stream.read_string_ref() or None
 
+            # optional flag 0x02 => class-level generic Signature (JVMS 4.7.9). CONFIRMED
+            # empirically: on classes carrying it the SRP record decodes to a valid
+            # signature (e.g. GPair -> "<F:...;S:...>L...;"). The J9 romizer KEEPS these
+            # (contrary to the old "generics fully erased" note) - jxe2jar had been
+            # dropping them. SRP index = popcount of the flags below 0x02 (i.e. 0x01,
+            # SourceFile, which is always absent here -> index 0).
+            class_generic_signature = None
+            if (optional_flags & 0x02) and opt_raw != 0:
+                gi = bin(optional_flags & 0x01).count("1")
+                with StreamCursor(stream, opt_base + opt_raw + 4 * gi):
+                    class_generic_signature = stream.read_string_ref() or None
+
             # EnclosingMethod (optional flag 0x40): its SRP sits at index = popcount of
             # the optional flags below bit 0x40 and points at a J9EnclosingObject:
             #   { U32 classRefCPIndex; SRP nameAndSignature }
@@ -615,6 +639,8 @@ class J9ROMClass:
             enclosing_method_name=enclosing_method_name,
             enclosing_method_sig=enclosing_method_sig,
         )
+        romclass.optional_flags = optional_flags  # raw class-level optinfo bitfield (census/debug)
+        romclass.class_generic_signature = class_generic_signature  # JVMS Signature (0x02), or None
         return romclass
 
 

@@ -2,7 +2,7 @@ package cases;
 
 /**
  * Exercise sipush-range values (128..32767 / -129..-32768) passed as
- * method arguments — the exact pattern that was zeroed out by the
+ * method arguments - the exact pattern that was zeroed out by the
  * sipush-as-branch bug.
  *
  * javac emits:
@@ -13,7 +13,7 @@ package cases;
  */
 public class SipushArgs {
 
-    /* Sink methods — prevent javac from folding constants away. */
+    /* Sink methods - prevent javac from folding constants away. */
 
     public static int sink(int v) { return v; }
     public static int sink2(int a, int b) { return a + b; }

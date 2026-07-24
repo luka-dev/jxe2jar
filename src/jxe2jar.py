@@ -282,6 +282,12 @@ def dump_romclass(
     # Infer the minimal classfile version required by flags/opcodes.
     target_minor = 0
     target_major = _infer_classfile_major(romclass)
+    if (
+        getattr(romclass, "class_generic_signature", None)
+        or any(getattr(m, "generic_signature", None) for m in romclass.methods)
+        or any(getattr(f, "generic_signature", None) for f in romclass.fields)
+    ):
+        target_major = max(target_major, 49)  # Signature attribute needs >= 49
     stream.write_u16(target_minor)
     stream.write_u16(target_major)
     const_pool = ConstPool(romclass)
@@ -349,6 +355,15 @@ def dump_romclass(
                     "attribute_name_index": const_value_attr_name_index,
                     "attribute_length": 2,
                     "constantvalue_index": const_index,
+                }
+            )
+
+        field_sig = getattr(field, "generic_signature", None)
+        if field_sig:
+            attributes.append(
+                {
+                    "signature_index": const_pool.add(CONST.UTF8, field_sig),
+                    "attribute_name_index": const_pool.add(CONST.UTF8, "Signature"),
                 }
             )
 
@@ -447,6 +462,15 @@ def dump_romclass(
                         "exceptions": exc_indices,
                     }
                 )
+        method_sig = getattr(method, "generic_signature", None)
+        if method_sig:
+            attributes.append(
+                {
+                    "kind": "signature",
+                    "attribute_name_index": const_pool.add(CONST.UTF8, "Signature"),
+                    "signature_index": const_pool.add(CONST.UTF8, method_sig),
+                }
+            )
         method_info_list.append(
             {
                 "access_flags": method_flags,
@@ -480,6 +504,17 @@ def dump_romclass(
             "method_index": method_index,
         }
 
+    # Class-level generic Signature (JVMS 4.7.9): the J9 romizer keeps it (optional
+    # flag 0x02), so restore it - recovers generics on the de/audi/.../generics/*
+    # framework and generic anonymous classes that were otherwise erased.
+    signature_attr = None
+    class_sig = getattr(romclass, "class_generic_signature", None)
+    if class_sig:
+        signature_attr = {
+            "attribute_name_index": const_pool.add(CONST.UTF8, "Signature"),
+            "signature_index": const_pool.add(CONST.UTF8, class_sig),
+        }
+
     const_pool.write(stream)
 
     class_access_flags = romclass.access_flags & CLASS_FLAG_MASK
@@ -505,8 +540,11 @@ def dump_romclass(
         stream.write_u16(field_info["attributes_count"])
         for attr in field_info["attributes"]:
             stream.write_u16(attr["attribute_name_index"])
-            stream.write_u32(attr["attribute_length"])
-            stream.write_u16(attr["constantvalue_index"])
+            stream.write_u32(2)
+            stream.write_u16(
+                attr["signature_index"] if "signature_index" in attr
+                else attr["constantvalue_index"]
+            )
 
     stream.write_u16(len(method_info_list))
 
@@ -516,6 +554,11 @@ def dump_romclass(
         stream.write_u16(method_info["descriptor_index"])
         stream.write_u16(method_info["attributes_count"])
         for attribute in method_info["attributes"]:
+            if attribute.get("kind") == "signature":
+                stream.write_u16(attribute["attribute_name_index"])
+                stream.write_u32(2)
+                stream.write_u16(attribute["signature_index"])
+                continue
             if attribute.get("kind") == "exceptions":
                 exc = attribute["exceptions"]
                 stream.write_u16(attribute["attribute_name_index"])
@@ -540,7 +583,11 @@ def dump_romclass(
             if attribute["attributes_count"]:
                 raise NotImplementedError()
 
-    stream.write_u16(bool(inner_attr) + bool(enclosing_attr))
+    stream.write_u16(bool(inner_attr) + bool(enclosing_attr) + bool(signature_attr))
+    if signature_attr:
+        stream.write_u16(signature_attr["attribute_name_index"])
+        stream.write_u32(2)
+        stream.write_u16(signature_attr["signature_index"])
     if inner_attr:
         stream.write_u16(inner_attr["attribute_name_index"])
         stream.write_u32(2 + 8 * len(inner_attr["classes"]))

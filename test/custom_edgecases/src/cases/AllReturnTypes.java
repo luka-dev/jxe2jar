@@ -6,17 +6,17 @@ package cases;
  * produce valid output.
  *
  * javac maps:
- *   void     -> return   (0xB1)  — J9 JBreturn0
- *   boolean  -> ireturn  (0xAC)  — J9 JBreturn1
- *   byte     -> ireturn  (0xAC)  — J9 JBreturn1
- *   char     -> ireturn  (0xAC)  — J9 JBreturn1
- *   short    -> ireturn  (0xAC)  — J9 JBreturn1
- *   int      -> ireturn  (0xAC)  — J9 JBreturn1
- *   float    -> freturn  (0xAE)  — J9 JBreturn1
- *   long     -> lreturn  (0xAD)  — J9 JBreturn2
- *   double   -> dreturn  (0xAF)  — J9 JBreturn2
- *   Object   -> areturn  (0xB0)  — J9 JBreturn1
- *   array    -> areturn  (0xB0)  — J9 JBreturn1
+ *   void     -> return   (0xB1)  - J9 JBreturn0
+ *   boolean  -> ireturn  (0xAC)  - J9 JBreturn1
+ *   byte     -> ireturn  (0xAC)  - J9 JBreturn1
+ *   char     -> ireturn  (0xAC)  - J9 JBreturn1
+ *   short    -> ireturn  (0xAC)  - J9 JBreturn1
+ *   int      -> ireturn  (0xAC)  - J9 JBreturn1
+ *   float    -> freturn  (0xAE)  - J9 JBreturn1
+ *   long     -> lreturn  (0xAD)  - J9 JBreturn2
+ *   double   -> dreturn  (0xAF)  - J9 JBreturn2
+ *   Object   -> areturn  (0xB0)  - J9 JBreturn1
+ *   array    -> areturn  (0xB0)  - J9 JBreturn1
  */
 public class AllReturnTypes {
 
