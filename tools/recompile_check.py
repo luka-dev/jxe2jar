@@ -25,13 +25,30 @@ RUNTIME TARGET (verified from a live core dump, `-Dcom.ibm.oti...`, jclfoun11):
 This tool defaults to -source/-target 1.4 (the real runtime level) and additionally
 FAILS any class whose bytecode references a --forbid class (StringBuilder etc.).
 
+METHOD-LEVEL 1.5 API (--jcl):  the --forbid bytecode scan only catches forbidden *classes*
+(StringBuilder/Enum/Iterable).  It does NOT catch 1.5+ *methods* on classes that DO exist in
+the firmware (e.g. Class.getSimpleName, which stock IBM CDC 1.1 lacks) -- because by default
+`java.lang.*` resolves from the JDK8 bootclasspath, where getSimpleName exists, so it compiles
+clean (false pass).  Pass `--jcl libs/jcl/<FW>/jcl.jar` to put the firmware JCL on the
+-bootclasspath: then java.lang.Class is the *firmware* one (no getSimpleName) and the call
+fails to compile -- a real method-level catch.  This is complete-by-construction for a jar
+decompiled from that same firmware (every API it uses is in that firmware's reachable JCL).
+
+javap TRAP (why to trust --jcl, not javap):  `javap -classpath jcl.jar java.lang.Class` still
+prints the JDK8 class (getSimpleName present, StringBuilder-based body) because java.lang.*
+loads from bootclasspath, not -classpath.  To inspect the real firmware class, extract the
+.class from the jar and run `javap` on the FILE (`javap Class.class`) -- the authentic one is
+StringBuffer-based with IBM *Impl native methods and no getSimpleName.
+
 Usage:
   recompile_check.py <file_or_dir> [more...] [options]
     --jar PATH        stock classpath jar (default: out/MU1316-combined-final.jar)
+    --jcl PATH        firmware JCL jar for -bootclasspath (catches method-level 1.5 API);
+                      alias --bootclasspath. Default: none (uses javac's JDK8 boot -> misses methods)
     --osgi DIR        dir with org.osgi.*.jar (default: libs)
     --javac PATH      javac (default: bundled Zulu 8)
-    --source LVL      -source (default: 5)
-    --target LVL      -target (default: 5)
+    --source LVL      -source (default: 1.4)
+    --target LVL      -target (default: 1.4)
     --batch N         files per javac invocation (default: 300)
     --limit N         cap number of files (for sampling a huge tree)
     --show K          print up to K example files per artifact category (default: 5)
@@ -57,6 +74,8 @@ CLASSIFIERS = [
                          "decompiler @Override -> strip (or raise -source)"),
     ("javac-crash",      re.compile(r"An exception has occurred in the compiler|java\.lang\.\w*Exception\b.*javac", re.S),
                          "javac internal bug on this source shape -> whole-class / rewrite"),
+    ("missing-method-api", re.compile(r"cannot find symbol\b.*symbol:\s*method", re.S),
+                         "method absent from firmware JCL (1.5+ API on a class that exists at 1.4) -> avoid it"),
     ("missing-type",     re.compile(r"package [\w.]+ does not exist|cannot find symbol\b.*symbol:\s*class"),
                          "unresolved dependency (native-only / not in jar)"),
     ("generics-raw",     re.compile(r"incompatible types|inconvertible types|unchecked"),
@@ -88,6 +107,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--jar", default=DEF_JAR)
+    ap.add_argument("--jcl", "--bootclasspath", dest="jcl", default=None,
+                    help="firmware JCL jar on -bootclasspath (catches method-level 1.5 API "
+                         "like Class.getSimpleName that -cp cannot)")
     ap.add_argument("--osgi", default=DEF_OSGI)
     ap.add_argument("--javac", default=DEF_JAVAC)
     ap.add_argument("--source", default="1.4")
@@ -109,15 +131,22 @@ def main():
     files = collect(a.paths, a.limit)
     if not files:
         print("no .java files found"); return 2
+    boot = []
+    if a.jcl:
+        if not os.path.exists(a.jcl):
+            print("--jcl not found: %s" % a.jcl); return 2
+        boot = ["-bootclasspath", a.jcl]
     print("recompile_check: %d files, -source %s -target %s" % (len(files), a.source, a.target))
-    print("classpath: %s (+osgi)\n" % os.path.basename(a.jar))
+    print("classpath: %s (+osgi)%s\n" % (os.path.basename(a.jar),
+          "  bootclasspath: %s (method-level API enforced)" % os.path.basename(a.jcl) if a.jcl else
+          "  (no --jcl: java.lang.* from JDK8 boot -> method-level 1.5 API NOT caught)"))
 
     fail = {}  # file -> (category, first_error_line, hint)
     outdir = tempfile.mkdtemp(prefix="recompile_qa_")
     for i in range(0, len(files), a.batch):
         batch = files[i:i+a.batch]
-        cmd = [a.javac, "-nowarn", "-proc:none", "-source", a.source, "-target", a.target,
-               "-cp", cp, "-d", outdir] + batch
+        cmd = [a.javac, "-nowarn", "-proc:none", "-source", a.source, "-target", a.target] + boot + \
+              ["-cp", cp, "-d", outdir] + batch
         r = subprocess.run(cmd, capture_output=True, text=True)
         err = r.stderr
         # attribute errors to files by "path.java:line: error:"

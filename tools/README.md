@@ -180,13 +180,25 @@ python3 tools/xref.py out/final.jar --dump    xref.txt                # full rev
 ```
 
 ### `recompile_check.py`
-Round-trip QA gate: attempts to recompile the decompiled `.java` tree (against a bootclasspath -
-the firmware `jcl.jar`) and reports what still fails. Closes the loop
-`jxe -> jar -> uninline -> decompile -> [fixers] -> recompile_check`. Read-only report, no fixing.
+Round-trip QA gate: recompiles the decompiled `.java` tree (against the stock jar; `-source/-target
+1.4` = real runtime level) and reports what fails, classified by artifact. Closes the loop
+`jxe -> jar -> uninline -> decompile -> [fixers] -> recompile_check`. Read-only, no fixing.
+
+Pass **`--jcl libs/jcl/<FW>/jcl.jar`** to put the firmware JCL on `-bootclasspath` -- only then
+are **method-level** 1.5 APIs caught (e.g. `Class.getSimpleName`, which the CDC 1.1 firmware
+lacks but JDK8 has); plain `-cp` resolves `java.lang.*` from JDK8 and misses them. The `--forbid`
+bytecode scan still catches forbidden *classes* (`StringBuilder`/`Enum`/`Iterable`).
 
 ```sh
 python3 tools/recompile_check.py out/final-vf
+python3 tools/recompile_check.py out/final-vf --jcl libs/jcl/MHI2Q_US_AUG22_P5087_MU1316/jcl.jar
 ```
+
+**`javap` trap** (why trust `--jcl`, not `javap`): `javap -classpath jcl.jar java.lang.Class`
+still prints the **JDK8** class (`getSimpleName` present, StringBuilder-based body) because
+`java.lang.*` loads from the bootclasspath, not `-classpath`. To inspect the real firmware
+class, extract the `.class` from the jar and run `javap` on the **file** (`javap Class.class`) --
+the authentic one is StringBuffer-based, has IBM `*Impl` native methods, and no `getSimpleName`.
 
 ---
 
