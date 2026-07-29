@@ -9,15 +9,13 @@ compatible with common JVM tooling. It performs a small set of fixups:
 
 Usage:
   python3 src/jxe2jar.py input.jxe output.jar
-  python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
-  python3 src/jxe2jar.py input.jxe output.jar --skip-jdk /path/to/rt.jar
   python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
+  python3 src/jxe2jar.py input.jxe output.jar --dont-infer-enclosing
 
 Notes:
- - JDK/JRE classes are skipped by default using src/rt.classes.
- - --skip-jdk can point to a custom JAR/JMOD/list file (e.g. rt.jar).
- - --skip-classes can add additional classes to skip.
- - --skip-libs skips classes already present in a libs/ JAR directory.
+ - Every class in the image is converted (no skipping).
+ - EnclosingMethod is synthesized for ROM-erased anon classes by default
+   (so decompilers inline them); --dont-infer-enclosing turns this off.
  - --strip-synthetic clears ACC_SYNTHETIC flags for stricter javap output.
  - Some JXE images embed non-standard metadata; output is best-effort.
 """
@@ -275,7 +273,8 @@ def _build_inner_classes_attr(romclass, const_pool, inner_meta, children):
 
 
 def dump_romclass(
-    stream, romclass, strip_synthetic: bool = False, inner_meta=None, children=None
+    stream, romclass, strip_synthetic: bool = False, inner_meta=None, children=None,
+    infer_enclosing: bool = False
 ) -> tuple[ConstPool, list]:  # pylint: disable=R0914, R0915
     """Dumps romclass."""
     stream.write_raw_bytes(b"\xca\xfe\xba\xbe")
@@ -504,6 +503,21 @@ def dump_romclass(
             "method_index": method_index,
         }
 
+    # Fallback (default; --dont-infer-enclosing to disable): the J9 romizer erased the EnclosingObject
+    # record for SOME anonymous/local classes, so has_enclosing_method is False and the
+    # block above skips them.  javac names anonymous/local classes Outer$N with N numeric;
+    # recover the enclosing class from the name (enclosing method unknown -> class-level,
+    # method_index 0, exactly as the ROM-kept ones look, e.g. #17.#0).  Without this a
+    # decompiler emits them as separate Outer$N.java files with unresolved private access.
+    if enclosing_attr is None and infer_enclosing:
+        _base, _sep, _tail = romclass.class_name.rpartition("$")
+        if _base and _tail.isdigit():
+            enclosing_attr = {
+                "attribute_name_index": const_pool.add(CONST.UTF8, "EnclosingMethod"),
+                "class_index": const_pool.add(CONST.CLASS, _base),
+                "method_index": 0,
+            }
+
     # Class-level generic Signature (JVMS 4.7.9): the J9 romizer keeps it (optional
     # flag 0x02), so restore it - recovers generics on the de/audi/.../generics/*
     # framework and generic anonymous classes that were otherwise erased.
@@ -607,7 +621,8 @@ def dump_romclass(
 
 
 def create_class(
-    romclass, jarfile, strip_synthetic: bool = False, inner_meta=None, children=None
+    romclass, jarfile, strip_synthetic: bool = False, inner_meta=None, children=None,
+    infer_enclosing: bool = False
 ) -> None:
     """Creates class"""
     class_name = romclass.class_name
@@ -615,110 +630,29 @@ def create_class(
     f_stream = io.BytesIO()
     stream = WriterStream(f_stream)
     res = dump_romclass(
-        stream, romclass, strip_synthetic=strip_synthetic, inner_meta=inner_meta, children=children
+        stream, romclass, strip_synthetic=strip_synthetic, inner_meta=inner_meta,
+        children=children, infer_enclosing=infer_enclosing
     )
     stream.write()
     jarfile.writestr(class_file, f_stream.getvalue())
     return res
 
 
-def _collect_classes_from_jar(jar_path):
-    classes = set()
-    try:
-        with zipfile.ZipFile(jar_path, 'r') as jar:
-            for name in jar.namelist():
-                if name.endswith('.class') and not name.startswith('META-INF/'):
-                    classes.add(name[:-6])
-    except Exception as exc:
-        print(f"Warning: Failed to read {jar_path}: {exc}")
-    return classes
-
-
-def _load_lib_classes(libs_path):
-    """Load set of class names from JAR files in libs directory."""
-    lib_classes = set()
-    if not libs_path or not os.path.exists(libs_path):
-        return lib_classes
-
-    print(f"Loading library classes from {libs_path}...")
-    for filename in os.listdir(libs_path):
-        if not filename.endswith('.jar'):
-            continue
-        jar_path = os.path.join(libs_path, filename)
-        lib_classes |= _collect_classes_from_jar(jar_path)
-
-    print(f"Loaded {len(lib_classes)} classes from libraries")
-    return lib_classes
-
-
-def _load_classes_from_list_file(list_path):
-    classes = set()
-    try:
-        with open(list_path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.endswith(".class"):
-                    line = line[:-6]
-                classes.add(line)
-    except Exception as exc:
-        print(f"Warning: Failed to read {list_path}: {exc}")
-    return classes
-
-
-def _load_classes_from_path(path):
-    if not path:
-        return set()
-    if os.path.isdir(path):
-        classes = set()
-        for filename in os.listdir(path):
-            if filename.endswith(".jar"):
-                classes |= _collect_classes_from_jar(os.path.join(path, filename))
-        return classes
-    if path.endswith(".jmod"):
-        classes = set()
-        try:
-            with zipfile.ZipFile(path, "r") as jmod:
-                for name in jmod.namelist():
-                    if name.startswith("classes/") and name.endswith(".class"):
-                        classes.add(name[len("classes/"):-6])
-        except Exception as exc:
-            print(f"Warning: Failed to read {path}: {exc}")
-        return classes
-    if path.endswith(".jar"):
-        return _collect_classes_from_jar(path)
-    return _load_classes_from_list_file(path)
-
-
-def _should_skip_class(class_name, skip_classes):
-    """Check if a class should be skipped."""
-    if skip_classes and class_name in skip_classes:
-        return True
-
-    return False
-
 
 def _create_jar(
     jar_name,
     jxe,
-    skip_classes=None,
     strip_synthetic=False,
+    infer_enclosing=True,
 ):
     with zipfile.ZipFile(jar_name, "w") as jar_zipfile:
         total = len(jxe.image.classes)
-        skipped = 0
         written = 0
 
         # Global nesting map from real ROM fields, used to reconstruct InnerClasses.
         inner_meta, children = build_inner_meta(jxe.image.classes)
 
         for idx, romclass in enumerate(jxe.image.classes, 1):
-            if _should_skip_class(romclass.class_name, skip_classes):
-                skipped += 1
-                print(f"[{idx}/{total}] {romclass.class_name} (skipped)")
-                continue
-
             print(f"[{idx}/{total}] {romclass.class_name}")
             try:
                 create_class(
@@ -727,12 +661,13 @@ def _create_jar(
                     strip_synthetic=strip_synthetic,
                     inner_meta=inner_meta,
                     children=children,
+                    infer_enclosing=infer_enclosing,
                 )
                 written += 1
             except Exception as exc:  # pylint: disable=W0718
                 print("bad class, skip", romclass.class_name, ": ", exc)
 
-        print(f"\nSummary: {written} classes written, {skipped} classes skipped")
+        print(f"\nSummary: {written} classes written")
 
 
 def _main():
@@ -742,44 +677,24 @@ def _main():
         epilog="""
 Examples:
   %(prog)s input.jxe output.jar
-  %(prog)s input.jxe output.jar --skip-libs libs/
-  %(prog)s input.jxe output.jar --skip-jdk /path/to/rt.jar
-  %(prog)s input.jxe output.jar --skip-classes path/to/rt.classes
   %(prog)s input.jxe output.jar --strip-synthetic
+  %(prog)s input.jxe output.jar --dont-infer-enclosing
         """)
 
     parser.add_argument('jxe_file', help='Input JXE file')
     parser.add_argument('jar_file', help='Output JAR file')
-    parser.add_argument('--skip-libs', metavar='DIR',
-                        help='Skip classes found in JAR files in the specified directory')
-    parser.add_argument('--skip-jdk', nargs='?', const='__DEFAULT__', metavar='PATH',
-                        help='Skip JDK/JRE classes (default: src/rt.classes, or provide rt.jar)')
-    parser.add_argument('--skip-classes', metavar='PATH',
-                        help='Skip classes listed in a JAR/JMOD/list file or directory')
     parser.add_argument('--strip-synthetic', action='store_true',
                         help='Clear ACC_SYNTHETIC flags on classes/methods/fields')
+    parser.add_argument('--dont-infer-enclosing', dest='infer_enclosing',
+                        action='store_false', default=True,
+                        help='Disable the default EnclosingMethod synthesis. By default, '
+                             'anonymous/local classes (Outer$N, N numeric) whose J9 '
+                             'EnclosingObject record the ROM erased get a synthesized '
+                             'EnclosingMethod attribute (enclosing class from the name, '
+                             'class-level) so decompilers inline them instead of emitting '
+                             'separate Outer$N.java with unresolved private access')
 
     args = parser.parse_args()
-
-    skip_classes = set()
-
-    if args.skip_jdk and args.skip_jdk != "__DEFAULT__":
-        skip_classes |= _load_classes_from_path(args.skip_jdk)
-        print(f"Loaded {len(skip_classes)} classes from {args.skip_jdk}")
-    else:
-        local_rtclasses = os.path.join(os.path.dirname(__file__), "rt.classes")
-        if os.path.isfile(local_rtclasses):
-            skip_classes |= _load_classes_from_list_file(local_rtclasses)
-            print(f"Loaded {len(skip_classes)} classes from {local_rtclasses}")
-        else:
-            print("Warning: src/rt.classes not found; not skipping JDK/JRE classes.")
-
-    if args.skip_classes:
-        skip_classes |= _load_classes_from_path(args.skip_classes)
-        print(f"Loaded {len(skip_classes)} classes from {args.skip_classes}")
-
-    if args.skip_libs:
-        skip_classes |= _load_lib_classes(args.skip_libs)
 
     with open(args.jxe_file, "rb") as fp_jar:
         stream = ReaderStream(fp_jar)
@@ -787,8 +702,8 @@ Examples:
         _create_jar(
             args.jar_file,
             jxe,
-            skip_classes=skip_classes if skip_classes else None,
             strip_synthetic=args.strip_synthetic,
+            infer_enclosing=args.infer_enclosing,
         )
 
 

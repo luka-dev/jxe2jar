@@ -1,4 +1,4 @@
-# uninline — bytecode constant & accessor recovery
+# uninline - bytecode constant & accessor recovery
 
 Self-contained ASM tool suite that turns the raw literals in a J9-converted jar back into
 symbolic references, so the decompiled Java reads like source. **No regex over source text**;
@@ -24,7 +24,7 @@ tools/uninline/build.sh          # needs JDK 17+ (produces uninline.jar)
 ```sh
 U=tools/uninline/uninline.sh
 
-# full pipeline: base.jar -> recovered.jar (+ doubtful.tsv for annotate_doubtful.py)
+# full pipeline: base.jar -> recovered.jar (+ doubtful.tsv QA sidecar)
 $U pipeline out/base.jar out/final.jar out/doubtful.tsv 100
 
 # or step by step:
@@ -43,17 +43,16 @@ $U audit    out/final.jar                       # type-ambiguity / jsr / utf-8 a
 | command  | class          | what it does |
 |----------|----------------|--------------|
 | uninline | `Uninliner`    | rewrite literal-loads to `getstatic Owner.FIELD` for all constant types, tiered: T1 closure-unique, T2 global-unique+distinctive, T3a co-reference+distinctive. |
-| sink     | `SinkResolve`  | T3b — learn each `(callee,method,argIndex)` slot's constant family from surviving getstatic args (self-seeded), resolve non-distinctive literals flowing into a learned slot. Fixpoint + field/switch domains. `--domains <md>` dumps the map. |
-| refine   | `RefineResolve`| three-way QA: KEEP (family-cohesion / distinctiveness / lexical name-context), REVERT genuine collisions to honest numbers, FLAG the rest (-> `doubtful.tsv`, consumed by `annotate_doubtful.py`). |
+| sink     | `SinkResolve`  | T3b - learn each `(callee,method,argIndex)` slot's constant family from surviving getstatic args (self-seeded), resolve non-distinctive literals flowing into a learned slot. Fixpoint + field/switch domains. `--domains <md>` dumps the map. |
+| refine   | `RefineResolve`| three-way QA: KEEP (family-cohesion / distinctiveness / lexical name-context), REVERT genuine collisions to honest numbers, FLAG the rest (-> `doubtful.tsv` QA sidecar of low-confidence resolutions). |
 | access   | `AccessInline` | inline synthetic `access$NNN` accessors to the real field/method access (reads the body, stack-guarded). |
 | verify   | `VerifyResolve`| instruction-diff original vs recovered: every replacement must be `literal V -> getstatic F where value(F)==V`. Reports 0 mismatches + a name-provenance audit. |
 | audit    | `TypeAudit`    | correctness audit: field ConstantValue vs descriptor, `ldc2_w` long/double typing, `jsr`/`ret`, modified-UTF-8 edges. |
 
 ## Guarantees
 
-- **100% value-correct** — a getstatic reads exactly the literal's value (`VerifyResolve` proves it).
-- **~99.98% name-correct** — the ~0.02% low-confidence collisions are reverted to honest numbers;
-  `RefineResolve` emits them to `doubtful.tsv`, and `tools/annotate_doubtful.py` marks each in the
-  decompiled source with an inline `/* ?? maybe Owner.FIELD */`.
-- **Decompile-only** — a `getstatic` can trigger class init, so the jar is a reading aid, not
+- **100% value-correct** - a getstatic reads exactly the literal's value (`VerifyResolve` proves it).
+- **~99.98% name-correct** - the ~0.02% low-confidence collisions are reverted to honest numbers;
+  `RefineResolve` emits them to `doubtful.tsv` as a QA sidecar for manual review.
+- **Decompile-only** - a `getstatic` can trigger class init, so the jar is a reading aid, not
   runnable bytecode.

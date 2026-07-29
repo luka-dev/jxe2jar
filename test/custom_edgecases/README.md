@@ -30,7 +30,7 @@ This folder contains **edge-case Java 1.2 test classes** used to validate `jar2j
 | `NullChecks` | `ifnull` / `ifnonnull` |
 | `Constants` | Static final primitives + String ConstantValue |
 | `ManyConstants` | Large constant pool pressure |
-| `FloatDoubleBits` | NaN/Inf/±0.0 and bit-exact float/double constants |
+| `FloatDoubleBits` | NaN/Inf/+/-0.0 and bit-exact float/double constants |
 | `UnicodeStrings` | Empty + UTF-8 edge cases (uses `\u` escapes) |
 | `ClassLiterals` | Class literal usage |
 | `InterfaceInvoke` + `InterfaceInvoke$*` | Interface calls and dispatch |
@@ -49,7 +49,7 @@ This folder contains **edge-case Java 1.2 test classes** used to validate `jar2j
    ```sh
    sh test/custom_edgecases/build.sh
    ```
-2. Convert JAR → JXE (WM5 emulator + `jar2jxe.exe`)
+2. Convert JAR -> JXE (WM5 emulator + `jar2jxe.exe`)
 3. Convert back:
    ```sh
    python3 src/jxe2jar.py cases.jxe cases.from_jxe.jar

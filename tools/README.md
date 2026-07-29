@@ -6,29 +6,46 @@ or navigability; none is required for a plain decompile.
 
 ```mermaid
 flowchart LR
-    JAR["base.jar"] --> U["uninline/<br/>(ASM constant recovery)"]
+    JAR["base.jar"] --> C["combine.sh<br/>(+ bundles/jars)"]
+    C --> U["uninline/<br/>(ASM constant recovery)"]
     U --> VF["vineflower.sh"]
     VF --> FB["decompile_fallback.py<br/>(CFR)"]
-    FB --> RP["fix_vf_artifacts - fix_class_literals<br/>int2hex - annotate_doubtful"]
+    FB --> RP["fix_vf_artifacts<br/>int2hex"]
     RP --> SRC["readable .java"]
     U -.-> NAV["nav_index.py - xref.py<br/>(analysis, no mutation)"]
 ```
 
 | tool | kind | one-liner |
 |------|------|-----------|
+| [`combine.sh`](#combinesh) | merge | fold the firmware's OSGi bundles + app jars into the lsd base jar (`--appimg`) |
 | [`uninline/`](uninline/README.md) | ASM suite | recover inlined `static final` **names** (literal -> `getstatic`), value-verified |
 | [`vineflower.sh`](#vineflowersh) | driver | primary decompiler (VF 1.12.0, `jad` renamer, JDK8 runtime) |
 | [`cfr.sh`](#cfrsh) | driver | alternate decompiler (CFR 0.152) for cross-referencing |
 | [`decompile_fallback.py`](#decompile_fallbackpy) | repair | re-decompile VF stubs with CFR |
 | [`fix_vf_artifacts.py`](#fix_vf_artifactspy) | repair | fix `<unrepresentable>` / keyword-identifier artifacts |
-| [`fix_class_literals.py`](#fix_class_literalspy) | repair | Java 1.2 `class$()` -> `Foo.class` |
 | [`int2hex.py`](#int2hexpy) | repair | decimal bitmasks/flags -> hex |
-| [`annotate_doubtful.py`](#annotate_doubtfulpy) | repair | inline `/* ?? maybe Owner.FIELD */` at low-confidence constants |
+| [`foreach1_4/`](#foreach1_4) | repair | indexed `for` loops -> enhanced for-each (javaparser) |
 | [`nav_index.py`](#nav_indexpy) | analysis | "what is value N" / "who uses this constant" index |
 | [`xref.py`](#xrefpy) | analysis | bytecode cross-reference (callers/uses/dump) |
+| [`recompile_check.py`](#recompile_checkpy) | QA | round-trip gate: does the decompiled source recompile? |
 
 Bundled jars: `vineflower-1.12.0.jar`, `cfr-0.152.jar`, `jd-cli.jar` (unused legacy), plus
 `uninline/uninline.jar` (built).
+
+---
+
+## combine.sh
+
+Folds the firmware's OSGi bundles and app jars into the lsd base jar, so the un-inliner sees the
+whole closure (cross-corpus constant recovery) and Vineflower resolves all app code intra-jar.
+Run between `jxe2jar` and the un-inliner. lsd wins on class-name collisions.
+
+```sh
+# --appimg = app image root (.../advanced/<MODEL>-appimg); auto-adds eso/bundles + bundles_prod + hmi/lsd/jars
+tools/combine.sh out/base.jar out/combined.jar --appimg /path/to/<MODEL>-appimg
+# or explicit sources:
+tools/combine.sh out/base.jar out/combined.jar "$APPIMG/eso/bundles" "$APPIMG/eso/hmi/lsd/jars"
+```
 
 ---
 
@@ -48,7 +65,8 @@ tools/uninline/uninline.sh verify   base.jar final.jar                   # 0 val
 tools/uninline/uninline.sh audit    final.jar                            # type-ambiguity audit
 ```
 
-`doubtful.tsv` feeds [`annotate_doubtful.py`](#annotate_doubtfulpy).
+`doubtful.tsv` is a QA sidecar: the low-confidence resolutions `RefineResolve` reverted to
+honest numbers (for manual review).
 
 ---
 
@@ -112,19 +130,6 @@ python3 tools/fix_vf_artifacts.py out/final-vf            # report
 python3 tools/fix_vf_artifacts.py out/final-vf --apply    # <unrepresentable> -> Object, etc.
 ```
 
-### `fix_class_literals.py`
-Java 1.2 code uses a synthetic `class$()` method instead of `Foo.class`. Neither VF nor CFR
-collapses it from J9-converted bytecode, leaving ternaries like
-`(class$foo$Bar == null ? (class$foo$Bar = class$("foo.Bar")) : class$foo$Bar)`. This replaces
-them with `foo.Bar.class` and removes the leftover synthetic `static Class class$...` fields and
-`class$()` methods. Works on both VF and CFR output.
-
-```sh
-python3 tools/fix_class_literals.py out/final-vf              # report
-python3 tools/fix_class_literals.py out/final-vf --apply      # apply
-python3 tools/fix_class_literals.py out/final-vf --apply -v   # verbose (per file)
-```
-
 ### `int2hex.py`
 Decompilers emit all integers in decimal; bitmasks/flags read better in hex (`6291488 -> 0x600020`).
 Scores each literal (power of 2, all-ones mask, nibble-aligned, sparse/dense bits, nearby
@@ -137,15 +142,14 @@ python3 tools/int2hex.py out/final-vf --threshold 1.0 --apply   # aggressive (co
 python3 tools/int2hex.py out/final-vf --report report.csv       # CSV for manual review
 ```
 
-### `annotate_doubtful.py`
-Consumes the `doubtful.tsv` from `uninline refine`. For each low-confidence resolution (reverted
-to an honest number), inserts an inline `/* ?? maybe Owner.FIELD */` right at that literal in the
-`.java` - uncertainty where it lives, instead of a TSV nobody reads. Confident resolutions stay
-clean symbolic references. Only ~dozens of sites.
+### `foreach1_4`
+Java 1.4 has no enhanced `for`, so loops decompile as indexed `for (int i=0; i<n; i++)` /
+`Iterator` boilerplate. `RewriteForeach` (javaparser + symbol-solver, bundled jars in the dir)
+rewrites them to `for (T x : coll)` where provably equivalent. Source-level, scoped by
+`scope.txt`. Cosmetic - readability only, does not affect correctness.
 
 ```sh
-python3 tools/annotate_doubtful.py out/final-vf out/doubtful.tsv           # would-annotate count
-python3 tools/annotate_doubtful.py out/final-vf out/doubtful.tsv --apply   # insert comments
+java -cp "tools/foreach1_4/*:tools/foreach1_4" RewriteForeach <src-dir>
 ```
 
 ---
@@ -173,6 +177,15 @@ constant pool - precise, unlike grepping decompiled text.
 python3 tools/xref.py out/final.jar --callers de/.../MapInterface.validateGELicenseState
 python3 tools/xref.py out/final.jar --uses    de/.../MapInterface     # what it references
 python3 tools/xref.py out/final.jar --dump    xref.txt                # full reverse index
+```
+
+### `recompile_check.py`
+Round-trip QA gate: attempts to recompile the decompiled `.java` tree (against a bootclasspath -
+the firmware `jcl.jar`) and reports what still fails. Closes the loop
+`jxe -> jar -> uninline -> decompile -> [fixers] -> recompile_check`. Read-only report, no fixing.
+
+```sh
+python3 tools/recompile_check.py out/final-vf
 ```
 
 ---

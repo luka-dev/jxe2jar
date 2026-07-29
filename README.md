@@ -13,7 +13,7 @@ what the ROM erased for good (real local names, line numbers).
 
 - [Pipeline at a glance](#pipeline-at-a-glance) - end-to-end diagram + one-shot commands
 - [Repository Structure](#repository-structure)
-- [Decompilation Workflow](#decompilation-workflow) - the 5 numbered steps
+- [Decompilation Workflow](#decompilation-workflow) - the 6 numbered steps
 - [Constant un-inlining (ASM)](#constant-un-inlining-asm---recover-inlined-static-final-names) - tiers, the **distinctiveness gate**, sink-domain fixpoint, 3-way QA
 - [Decompiler reference](#decompiler-reference) - full Vineflower / CFR option sets (per-tool docs in [`tools/README.md`](tools/README.md))
 - [How conversion works](#how-conversion-works) - converter internals: [J9 opcode space](#the-j9-opcode-space--srcbytecodepy), [what `jxe.py` reads](#what-jxepy-reads-out-of-each-rom-class), and every classfile fixup
@@ -28,11 +28,11 @@ decompiler prints the real name, 100 % value-verified. End-to-end, one image:
 
 ```sh
 tools/uninline/build.sh                                                     # once (JDK 17+)
-python3 src/jxe2jar.py in.jxe out/base.jar --skip-jdk <emptyfile>          # convert
-tools/uninline/uninline.sh pipeline out/base.jar out/final.jar out/doubtful.tsv 100
-bash tools/vineflower.sh    out/final.jar out/final-vf                     # decompile
-python3 tools/annotate_doubtful.py out/final-vf out/doubtful.tsv --apply   # inline doubts
-python3 tools/nav_index.py  out/final.jar out/nav                          # navigation index
+python3 src/jxe2jar.py in.jxe out/base.jar                                 # convert
+tools/combine.sh out/base.jar out/combined.jar --appimg <APPIMG>           # + bundles & app jars
+tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
+bash tools/vineflower.sh out/final.jar out/final-vf                        # decompile
+python3 tools/nav_index.py out/final.jar out/nav                           # navigation index
 ```
 
 ## Repository Structure
@@ -41,8 +41,8 @@ python3 tools/nav_index.py  out/final.jar out/nav                          # nav
 |------|-------------|
 | `src/` | **JXE -> JAR converter** (Python): `jxe.py` (ROM parser), `constpool.py` (constant pool), `bytecode.py` (J9 -> JVM bytecode), `jxe2jar.py` (classfile assembly + CLI), `common.py` |
 | `tools/uninline/` | **ASM constant/accessor recovery suite** - self-contained fat jar (`Uninliner` - `SinkResolve` - `RefineResolve` - `AccessInline` - `VerifyResolve` - `TypeAudit`). See its [README](tools/uninline/README.md) |
-| `tools/` | Decompile drivers (`vineflower.sh`, `cfr.sh`) and post-processors (`decompile_fallback.py`, `fix_vf_artifacts.py`, `fix_class_literals.py`, `int2hex.py`, `annotate_doubtful.py`, `nav_index.py`, `xref.py`) |
-| `libs/` | 22 SDK/framework jars, fed to Vineflower as `--add-external` (type resolution) and to the converter as `--skip-libs` |
+| `tools/` | Merge (`combine.sh`), decompile drivers (`vineflower.sh`, `cfr.sh`) and post-processors (`decompile_fallback.py`, `fix_vf_artifacts.py`, `int2hex.py`, `nav_index.py`, `xref.py`) |
+| `libs/` | 5 curated SDK jars (osgi.framework, osgi.util.tracker, commons.logging, xerces, commons-codec), fed to Vineflower as `--add-external` (type resolution) |
 | `jvms/` | Bundled runtimes: Zulu **JDK 8** (mac/linux/win - the target 1.2/1.3 stdlib) + WM5 emulator for `jar2jxe` |
 | `test/custom_edgecases/` | Exhaustive edge-case suite (Java 1.2) validating the converter via **JAR -> JXE -> JAR** round-trip |
 | `vms/` | XP VM + WM5 emulator hosting the legacy `jar2jxe.exe` (round-trip direction) |
@@ -57,15 +57,22 @@ instead of a wall of magic numbers.
 
 1. **Convert** the JXE to a JAR:
    ```
-   python3 src/jxe2jar.py input.jxe out/base.jar --skip-jdk <emptyfile>
+   python3 src/jxe2jar.py input.jxe out/base.jar
    ```
-   `--skip-jdk <emptyfile>` converts *every* ROM class, including the JDK / `java.*` ones.
-   Omit it to skip the JDK classes listed in `src/rt.classes`; add `--skip-libs <dir>` to
-   also skip anything already present in a `libs/` JAR.
+   Converts *every* ROM class in the image, including the JDK / `java.*` ones.
 
-2. **Recover inlined constant names** with the ASM un-inliner - **before decompiling**:
+2. **Combine** the lsd base with the firmware's OSGi bundles and app jars into one jar:
    ```
-   tools/uninline/uninline.sh pipeline out/base.jar out/final.jar out/doubtful.tsv 100
+   tools/combine.sh out/base.jar out/combined.jar --appimg <APPIMG>
+   ```
+   `<APPIMG>` is the app image root (`.../advanced/<MODEL>-appimg`); it auto-adds `eso/bundles`,
+   `eso/bundles_prod`, `eso/hmi/lsd/jars` (lsd wins name collisions). Folding them in *before*
+   the un-inliner gives cross-corpus constant recovery and lets Vineflower resolve all app code
+   intra-jar (no `--add-external` for it). Skip if you only want the bare lsd.
+
+3. **Recover inlined constant names** with the ASM un-inliner - **before decompiling**:
+   ```
+   tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
    ```
    `javac` folds `static final` constants into raw literals, so a naive decompile shows
    `getChoiceModel(402127)` instead of the symbolic name. This pipeline rewrites each literal
@@ -74,34 +81,42 @@ instead of a wall of magic numbers.
    `value(F) == literal` (0 mismatches on 106 k replacements). Full detail:
    [Constant un-inlining (ASM)](#constant-un-inlining-asm---recover-inlined-static-final-names).
 
-3. **Decompile** with Vineflower:
+4. **Decompile** with Vineflower:
    ```
-   tools/vineflower.sh out/final.jar out/final-vf
+   VF_JCL=libs/jcl/<FW>/jcl.jar tools/vineflower.sh out/final.jar out/final-vf
    ```
    `vineflower.sh` picks the newest bundled `vineflower-*.jar`, runs it on a JDK 17+ (VF 1.12
    targets class 61) while pointing `--include-runtime` at a bundled JDK 8 `rt.jar`, and uses
-   the `jad` variable renamer (`tiny` crashes on these classes). With the `InnerClasses`
-   attribute present, nested classes render inline instead of as separate `Outer$Inner.java`
-   files. See [Decompiling with Vineflower](#decompiling-with-vineflower) for the full option set.
+   the `jad` variable renamer (`tiny` crashes on these classes). `VF_JCL` (optional) resolves
+   against the firmware's own JCL (see [`libs/jcl/`](libs/jcl/README.md)) instead of generic SE8.
+   With the `InnerClasses` attribute present, nested classes render inline instead of as separate
+   `Outer$Inner.java` files. See [Decompiling with Vineflower](#decompiling-with-vineflower).
 
-4. **CFR fallback** for the rare method Vineflower cannot structure:
+5. **CFR fallback** for the rare method Vineflower cannot structure:
    ```
    python3 tools/decompile_fallback.py out/final-vf out/final.jar
    ```
    Finds any `// $VF: Couldn't be decompiled` stub and re-decompiles just that class with CFR,
    whose control-flow analysis handles cases VF's `DomHelper` rejects.
 
-5. **Repair artifacts, annotate doubts, index:**
+6. **Repair artifacts, index:**
    ```
    python3 tools/fix_vf_artifacts.py  out/final-vf --apply             # <unrepresentable> -> Object
-   python3 tools/fix_class_literals.py out/final-vf --apply            # class$() -> Foo.class
    python3 tools/int2hex.py           out/final-vf --apply             # hex bitmasks/flags
-   python3 tools/annotate_doubtful.py out/final-vf out/doubtful.tsv --apply   # inline /* ?? maybe */
    python3 tools/nav_index.py         out/final.jar out/nav            # who-uses / what-is-N index
    ```
 
 The output is readable Java with inline nested classes, `throws` clauses, generics, symbolic
 constant references, and hex bitmasks.
+
+> **Optional but recommended** for real head-unit firmware (MIB `lsd.jxe`):
+> - **step 2 `combine`** - folds the image's bundles + app jars in, so cross-corpus constant
+>   recovery works and Vineflower resolves app code intra-jar. Skip only for a bare, standalone jxe.
+> - **step 4 `VF_JCL`** - resolves against the firmware's own CDC JCL ([`libs/jcl/`](libs/jcl/README.md))
+>   instead of a generic SE8 rt.jar, so `@Override`/generics/overloads bind to the real API.
+>
+> Both are safe to omit (you still get valid Java); they just make the result more complete and
+> accurate. For a quick one-off jxe with no firmware context, run just steps 1, 3, 5-6.
 
 ## Constant un-inlining (ASM) - recover inlined `static final` names
 
@@ -119,7 +134,7 @@ flowchart LR
     L --> T3b["T3b sink-domain<br/>dataflow"]
     T1 & T2 & T3a & T3b --> R["RefineResolve<br/>3-way QA"]
     R -->|keep| G["getstatic Owner.FIELD"]
-    R -->|revert| N["honest number<br/>+ /* ?? maybe */"]
+    R -->|revert| N["honest number"]
     G --> A["AccessInline<br/>inline access$NNN"]
 ```
 
@@ -205,24 +220,23 @@ Every getstatic-to-int is re-judged lexically (tokenize camelCase / `UPPER_SNAKE
 
 ```sh
 tools/uninline/build.sh                                       # build uninline.jar (JDK 17+)
-python3 src/jxe2jar.py in.jxe out/base.jar --skip-jdk <emptyfile>          # convert (all classes)
-tools/uninline/uninline.sh pipeline out/base.jar out/final.jar out/doubtful.tsv 100
-bash tools/vineflower.sh    out/final.jar out/final-vf                     # decompile
-python3 tools/annotate_doubtful.py out/final-vf out/doubtful.tsv --apply   # inline /* ?? maybe */
+python3 src/jxe2jar.py in.jxe out/base.jar                                 # convert (all classes)
+tools/combine.sh out/base.jar out/combined.jar --appimg <APPIMG>          # + bundles & app jars
+tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
+bash tools/vineflower.sh out/final.jar out/final-vf                        # decompile
 python3 tools/nav_index.py  out/final.jar out/nav                          # navigation index
 # QA (optional):  tools/uninline/uninline.sh audit out/final.jar
 ```
 
 On MU1316: **106014 literal->getstatic replacements, 0 value-mismatches**; ~95 % high-confidence
 (globally-unique / own-class / distinctive), ~4.6 % flagged REVIEW, ~0.02 % genuine collisions
-reverted to honest numbers carrying an inline `/* ?? maybe Owner.FIELD */`. See
+reverted to honest numbers (listed in `doubtful.tsv` for review). See
 [`tools/uninline/README.md`](tools/uninline/README.md) for per-tool commands and guarantees.
 
 ## Decompiler reference
 
 The individual tools - decompile drivers (`vineflower.sh`, `cfr.sh`), repair passes
-(`decompile_fallback.py`, `fix_vf_artifacts.py`, `fix_class_literals.py`, `int2hex.py`,
-`annotate_doubtful.py`) and analysis (`nav_index.py`, `xref.py`) - are each documented in
+(`decompile_fallback.py`, `fix_vf_artifacts.py`, `int2hex.py`) and analysis (`nav_index.py`, `xref.py`) - are each documented in
 **[`tools/README.md`](tools/README.md)** with flags and examples. This section keeps the two
 things too bulky to inline there: the full Vineflower and CFR option sets.
 
@@ -301,18 +315,11 @@ java17+ -Xmx30g -jar tools/vineflower-1.12.0.jar \
   --verify-merges \
   --warn-inconsistent-inner-attributes=false \
   --add-external=path/to/jdk8/jre/lib/rt.jar \
-  --add-external=libs/client-runtime-3.3.0.jar \
-  --add-external=libs/ec.base-3.1.8.jar \
-  --add-external=libs/html-5.0.bv6.jar \
-  --add-external=libs/jquery-1.11.3.bv1.jar \
-  --add-external=libs/jquery-1.11.3.jar \
+  --add-external=libs/commons-codec-1.16.0.jar \
   --add-external=libs/org.apache.commons.logging-4.3.1.jar \
   --add-external=libs/org.apache.xerces-2.9.0.jar \
-  --add-external=libs/org.json-ld-3.1.8.jar \
   --add-external=libs/org.osgi.framework-1.10.0.jar \
   --add-external=libs/org.osgi.util.tracker-1.5.4.jar \
-  --add-external=libs/osgi.annotation-8.0.1.jar \
-  --add-external=libs/shared-3.3.0.jar \
   out/MU1316-lsd.jar out/MU1316-lsd-vf
 ```
 
@@ -327,7 +334,7 @@ Key options:
 - `--include-runtime=path/to/jdk8` - gives VF JDK8's stdlib for `@Override` on `Runnable`,
   `Iterator`, `Comparable`, etc.
 - `--add-external=path` - use `--add-external=` (not `-e`) when passing via scripts. Adds
-  `--skip-libs`-excluded SDK jars back as type info without including them in output. Skip
+  the `libs/` SDK jars as type info without including them in output. Skip
   `-javadoc.jar` / `-sources.jar`.
 
 ### Decompiling with CFR
@@ -386,8 +393,8 @@ Key options: `--sugar*`/`--decode*` recover high-level constructs; `--removeboil
 --removeinnerclasssynthetics` hide synthetic access methods; `--recover --allowcorrecting`
 best-effort recovery on broken bytecode.
 
-The repair passes that run after decompilation (`fix_class_literals.py`, `int2hex.py`,
-`fix_vf_artifacts.py`, `decompile_fallback.py`, `annotate_doubtful.py`) are documented in
+The repair passes that run after decompilation (`fix_vf_artifacts.py`, `int2hex.py`,
+`decompile_fallback.py`) are documented in
 **[`tools/README.md`](tools/README.md)**.
 
 ## How conversion works
@@ -513,7 +520,7 @@ ROM constant pool is read:
   primitive descriptor is a single char - `JJTANDNODE` is *not* `long` just because it starts `J`).
 - **Net result:** whole-jar `-Xverify:all` -> **0 VerifyError, 0 ClassFormatError** (remaining
   non-OK are benign: `java.*` classes the app loader refuses to define, and classes whose
-  supertypes were excluded via `--skip-libs`).
+  supertypes live only in the external `libs/` jars).
 
 ### Modified UTF-8 for string constants  (`src/constpool.py`)
 Classfile `CONSTANT_Utf8` uses JVM **Modified UTF-8** (JVMS 4.4.7), not standard UTF-8. The
@@ -523,8 +530,7 @@ char must be its UTF-16 surrogate pair as two 3-byte sequences (never a single 4
 Plain ASCII/BMP text is identical, so this only bites strings carrying NULs or astral chars -
 e.g. `java.text.CollationRules`, whose rule string embeds `U+0000..U+001F`, was rejected with
 *"Illegal UTF8 string in constant pool"*. `_encode_utf8` now emits proper Modified UTF-8.
-(Surfaced only when converting the JDK/`java.*` classes too - pass `--skip-jdk <emptyfile>` to
-convert every ROM class.)
+(Surfaced by the JDK/`java.*` classes, which the converter now always includes.)
 
 ### Float constant recovery  (`src/bytecode.py`)
 J9 stores both `int` and `float` as `J9CONST.INT` (type 0) - the ROM format has **no int/float
@@ -633,10 +639,9 @@ The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** r
 
 ## Usage Notes
 
-- JDK/JRE classes are skipped by default using `src/rt.classes`. Override with
-  `--skip-jdk /path/to/rt.jar`, or `--skip-jdk <emptyfile>` to convert **every** ROM class.
-- `--skip-classes` provides additional JAR/JMOD/list files or a directory to skip.
-- `--skip-libs <dir>` skips classes already present in a `libs/` JAR directory.
+- Every class in the image is converted (including JDK / `java.*`); there is no skip list.
+- `EnclosingMethod` is synthesized for ROM-erased anon classes (`Outer$N`) by default so
+  decompilers inline them; pass `--dont-infer-enclosing` to turn that off.
 - `ACC_SYNTHETIC` is preserved by default; `--strip-synthetic` for strict `javap` on 45.0 classes.
 - Classfile versions are inferred from flags (minimum 46) and never exceed 49 (keeps every class
   on the stack-map-free inference verifier; see [Classfile version](#classfile-version--srcjxe2jarpy)).

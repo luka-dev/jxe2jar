@@ -1,0 +1,4 @@
+ext = MU1367's device extension jars (same MHI2 / J9 2.3 CDC; 306/308 identical, only
+org/conscrypt/Platform* differ). MU1326's own jre is in an encrypted NAND ETFS (MMX_fs0.bin),
+not extractable without booting its MMX as a NAND device under fs-etfs.
+NOTE: core-lsd.jar IS MU1326's own (from its lsd.jxe) - only ext is the stand-in.

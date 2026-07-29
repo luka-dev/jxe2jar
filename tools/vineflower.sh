@@ -3,7 +3,12 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Vineflower 1.12.0 is compiled for Java 17 (class 61); it must RUN on a JDK 17+.
-# (rt.jar for --include-runtime stays JDK8 below, for decompiling the old target classes.)
+# --include-runtime is pinned to the bundled JDK8 (deterministic; "current" would be
+# whatever java runs VF). Measured: the runtime choice does NOT leak 1.5 types into output
+# for this target — the classes are compiled 1.2/1.4 (no Signature attrs), so VF has nothing
+# to reconstruct as StringBuilder/generics/enum regardless (verified 0 in output). An
+# authentic jclfoun rt was tried as --include-runtime but VF NPEs on a non-JDK-home path
+# AND it changed nothing, so JDK8 it is.
 if [ -n "$VINEFLOWER_JAVA" ]; then
   JAVA_BIN="$VINEFLOWER_JAVA"
 elif [ -x /usr/libexec/java_home ] && J17="$(/usr/libexec/java_home -v 17+ 2>/dev/null)"; then
@@ -41,7 +46,7 @@ REMOVE_SYNTHETIC=true
 
 # All --flag=value options first
 args=(
-  "$JAVA_BIN" -Xmx30g -jar "$VF_JAR"
+  "$JAVA_BIN" "-Xmx${VF_XMX:-30g}" -jar "$VF_JAR"
   --decompile-generics=true
   --decompile-enums=true
   --decompile-assert=true
@@ -55,7 +60,7 @@ args=(
   --remove-getclass=true
   --hide-default-constructor=true
   --hide-empty-super=true
-  --override-annotation=true
+  --override-annotation=false
   --inline-simple-lambdas=true
   --use-lvt-names=true
   --use-method-parameters=true
@@ -73,12 +78,18 @@ args=(
   "--banner="
   "--indent-string=    "
   --preferred-line-length=120
-  --thread-count=14
+  "--thread-count=${VF_THREADS:-14}"
   --old-try-dedup
   --warn-inconsistent-inner-attributes=false
   "--include-runtime=$JDK8_HOME"
-  "--add-external=$RTJAR"
 )
+
+# Firmware JCL as the API constraint: if VF_JCL points at the dump's own JCL
+# (e.g. out/mib2q-jcl.jar), resolve against it FIRST so @Override/generics/overloads
+# bind to the real CDC-FP API the firmware ships. Generic SE8 rt.jar stays as a
+# fallback for anything the (possibly partial) firmware JCL is missing.
+[ -n "$VF_JCL" ] && [ -f "$VF_JCL" ] && args+=("--add-external=$VF_JCL")
+args+=("--add-external=$RTJAR")
 
 # External libs
 if [ -d "$ROOT/libs" ]; then

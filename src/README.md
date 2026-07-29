@@ -1,6 +1,6 @@
 # src
 
-Python implementation of **JXE → JAR** conversion for IBM J9/CDC (ROM class) images.
+Python implementation of **JXE -> JAR** conversion for IBM J9/CDC (ROM class) images.
 
 ## Overview
 
@@ -11,26 +11,23 @@ This tool:
 
 ## Entry Point
 
-- `jxe2jar.py` – CLI to convert a `.jxe` into a `.jar`
+- `jxe2jar.py` - CLI to convert a `.jxe` into a `.jar`
 
 ## Usage
 
 ```sh
 python3 src/jxe2jar.py input.jxe output.jar
-python3 src/jxe2jar.py input.jxe output.jar --skip-libs libs/
-python3 src/jxe2jar.py input.jxe output.jar --skip-jdk /path/to/rt.jar
 python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
+python3 src/jxe2jar.py input.jxe output.jar --dont-infer-enclosing
 ```
 
 ## Flags
 
 | Flag | Description |
 |------|-------------|
-| (default) | JDK/JRE classes are skipped using `src/rt.classes` |
-| `--skip-jdk PATH` | Override the JDK/JRE skip list (e.g., `rt.jar`) |
-| `--skip-classes PATH` | Add classes from a JAR/JMOD/list file (or a directory of JARs) |
-| `--skip-libs DIR` | Skip classes present in JARs under `DIR` |
+| (default) | Every class is converted; `EnclosingMethod` is synthesized for ROM-erased anon classes (`Outer$N`) so decompilers inline them |
 | `--strip-synthetic` | Clear `ACC_SYNTHETIC` on classes/methods/fields (for strict javap) |
+| `--dont-infer-enclosing` | Turn off the default `EnclosingMethod` synthesis |
 
 ## Key Logic and Format Knowledge
 
@@ -53,7 +50,7 @@ Implemented in `jxe2jar.py`:
 
 ### Bytecode Transforms
 Implemented in `bytecode.py`:
-- J9 wide opcodes → standard `wide` form
+- J9 wide opcodes -> standard `wide` form
 - `invokeinterface` count byte computed from method descriptor
 - `ldc` upgraded to `ldc_w` if CP index > 255
 - Switch padding recalculated based on output position
