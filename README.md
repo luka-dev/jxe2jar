@@ -422,6 +422,7 @@ verifier or a decompiler rejects. This table is the map; each row links to the d
 | [`invokespecial` -> `invokevirtual`](#devirtualized-invokespecial---invokevirtual--srcbytecodepy) | `bytecode.py` | J9 devirtualizes final calls; verifier rejects the receiver |
 | [Constant-pool tail integrity](#constant-pool-tail-integrity--srcjxepy-srcconstpoolpy) | `jxe.py`, `constpool.py` | a dropped/garbage slot shifts every later CP index |
 | [Modified UTF-8](#modified-utf-8-for-string-constants--srcconstpoolpy) | `constpool.py` | NUL / astral chars are rejected by the loader |
+| [Empty ROM strings](#empty-rom-strings--srccommonpy) | `common.py` | a zero-length `J9UTF8` read as padding returns the *next* pool entry |
 | [Float constant recovery](#float-constant-recovery--srcbytecodepy) | `bytecode.py` | ROM merges int/float -> ternary "no common supertype" |
 | [InnerClasses reconstruction](#innerclasses-reconstruction-from-real-rom-metadata--srcjxe2jarpy-srcjxepy) | `jxe2jar.py`, `jxe.py` | correct nesting + inline decompilation |
 | [EnclosingMethod](#enclosingmethod-attribute--srcjxe2jarpy-srcjxepy) | `jxe2jar.py`, `jxe.py` | anonymous/local classes inline into their method |
@@ -531,6 +532,18 @@ Plain ASCII/BMP text is identical, so this only bites strings carrying NULs or a
 e.g. `java.text.CollationRules`, whose rule string embeds `U+0000..U+001F`, was rejected with
 *"Illegal UTF8 string in constant pool"*. `_encode_utf8` now emits proper Modified UTF-8.
 (Surfaced by the JDK/`java.*` classes, which the converter now always includes.)
+
+### Empty ROM strings  (`src/common.py`)
+A ROM string is a `J9UTF8`: **LE `u16` length**, then that many bytes of Modified UTF-8, padded
+to a 2-byte boundary. Records sit back-to-back in one shared pool, so an empty string is just
+`00 00` immediately followed by the next record. The reader used to try a "pad+length" layout
+first (`u16` padding, `u16` length, data) and accept it whenever the padding word was zero -
+which is true for *exactly one* input: an empty string. Every `""` therefore consumed the
+length **and data** of whichever record happened to follow it in the pool. On MU1326 that was
+`isNativeLittleEndian`, which turned up as a bogus string constant in 1086 classes (`java.io.File`,
+`java.net.URI`, `java.lang.Class`, ...). The pad+length path is gone; `_read_j9utf8_at` reads the
+real layout and treats a zero length word as the empty string it is. Covered by
+`test/test_rom_string.py`.
 
 ### Float constant recovery  (`src/bytecode.py`)
 J9 stores both `int` and `float` as `J9CONST.INT` (type 0) - the ROM format has **no int/float

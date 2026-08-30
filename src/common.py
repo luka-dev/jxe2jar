@@ -74,21 +74,25 @@ class ReaderStream:
         """Reads int32 le from file stream."""
         return self._bit_stream_.read("intle:32")
 
-    def _read_utf8_bytes(self, start_pos: int, expect_padding: bool = True):
-        """Helper to read pad+len data."""
-        padding = self.read_u16()
+    def _read_j9utf8_at(self, pos: int) -> str:
+        """Reads one J9UTF8 record: LE u16 length, then `length` bytes of modified UTF-8.
+
+        A zero length word is a genuine empty string, never a padding field. Reading it
+        as padding made the reader swallow the *next* record in the ROM UTF8 pool, so
+        every "" came out as whatever name happened to follow it in the pool.
+        """
+        self.set(pos)
         length = self.read_u16()
-        data_start = self.get()
-        available = max(0, self.len - data_start)
-        # Add sanity check: reject suspiciously large lengths
-        max_reasonable_length = min(available, 65535)
-        if (not expect_padding or padding == 0) and 0 <= length <= max_reasonable_length:
-            # Additional validation: length should be reasonable for a string
-            if length > 10000 and padding != 0:
-                raise ValueError("invalid ROM string header - length too large")
-            data = self.read_bytes(length)
-            return data
-        raise ValueError("invalid ROM string header")
+        available = max(0, self.len - self.get())
+        if length > min(available, 10000):
+            raise ValueError("invalid ROM string header")
+        if length == 0:
+            return ""
+        # decode_modified_utf8 raises UnicodeDecodeError, a ValueError subclass.
+        result = decode_modified_utf8(self.read_bytes(length))
+        if not _is_valid_string(result):
+            raise ValueError("ROM string does not look like text")
+        return result
 
     def _read_rom_string_at(self, pos: int, visited: set, debug=False):
         if pos in visited:
@@ -97,52 +101,12 @@ class ReaderStream:
         try:
             with StreamCursor(self, pos):
                 try:
-                    data = self._read_utf8_bytes(pos)
-                    try:
-                        result = decode_modified_utf8(data)
-                        if _is_valid_string(result):
-                            if debug:
-                                print(f"DEBUG _read_rom_string_at: pad+length path succeeded, len={len(result)}")
-                            return result
-                    except UnicodeDecodeError:
-                        pass
-                    # Don't use latin-1 fallback - it creates garbage in constant pool
-                except Exception as e:
+                    return self._read_j9utf8_at(pos)
+                except ValueError as exc:
                     if debug:
-                        print(f"DEBUG _read_rom_string_at: pad+length failed: {e}")
-                    pass
+                        print(f"DEBUG _read_rom_string_at: J9UTF8 at {hex(pos)} failed: {exc}")
 
-                # Try legacy u16 length BEFORE SRP table (SRP is too permissive and finds false matches)
-                self.set(pos)
-                length = self.read_u16()
-                available = max(0, self.len - self.get())
-                if debug:
-                    peek_bytes = b""
-                    saved = self.get()
-                    self.set(pos)
-                    peek_bytes = self.read_bytes(min(20, self.len - pos))
-                    self.set(saved)
-                    print(f"DEBUG legacy: pos={hex(pos)}, length={length} (0x{length:04x}), available={available}, peek={peek_bytes[:8].hex()}...")
-                # Add better validation: reject clearly invalid lengths
-                # Allow length=0 for empty strings
-                if 0 <= length <= min(available, 10000):
-                    data = self.read_bytes(length)
-                    # Empty string is valid
-                    if length == 0:
-                        return ""
-                    # Validate that the data looks like text
-                    try:
-                        result = decode_modified_utf8(data)
-                        # Validate result doesn't contain too many null bytes or control chars
-                        if _is_valid_string(result):
-                            if debug:
-                                print(f"DEBUG legacy SUCCESS: decoded {len(result)} chars: {result[:30]!r}")
-                            return result
-                    except UnicodeDecodeError:
-                        pass
-                    # Don't use latin-1 fallback for constant pool strings - it creates garbage
-
-                # Try SRP table (only if legacy format failed)
+                # Not a J9UTF8 record - try an SRP table pointing at the real ones.
                 self.set(pos)
                 targets = []
                 for _ in range(64):  # safety limit
@@ -160,28 +124,15 @@ class ReaderStream:
                     if target in visited:
                         continue
                     try:
-                        with StreamCursor(self, target):
-                            data = self._read_utf8_bytes(target)
-                            try:
-                                result = decode_modified_utf8(data)
-                                if _is_valid_string(result):
-                                    if debug:
-                                        print(f"DEBUG _read_rom_string_at: SRP path succeeded at {hex(target)}, len={len(result)}")
-                                    return result
-                            except UnicodeDecodeError:
-                                pass
-                            # Don't use latin-1 fallback - creates garbage
+                        return self._read_j9utf8_at(target)
+                    except ValueError:
+                        pass
+                    try:
+                        return self._read_rom_string_at(target, visited)
                     except Exception:
-                        try:
-                            result = self._read_rom_string_at(target, visited)
-                            if debug:
-                                print(f"DEBUG _read_rom_string_at: SRP recursive succeeded at {hex(target)}, len={len(result)}")
-                            return result
-                        except Exception:
-                            continue
+                        continue
 
-                # All formats failed - return empty string as last resort
-                # This prevents crashes when encountering unknown string formats
+                # All formats failed - "" keeps broken pointers out of the constant pool.
                 return ""
         finally:
             visited.remove(pos)
