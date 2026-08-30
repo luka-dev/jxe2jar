@@ -41,16 +41,19 @@ STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 # 1) lsd base first (it wins collisions via unzip -n below)
 unzip -oq "$BASE" -d "$STAGE"
 
-# 2) fold in every source jar/zip, never clobbering the lsd base (-n)
+# 2) fold in every source jar/zip, never clobbering the lsd base (-n).
+#    NUL-delimited so paths with spaces (e.g. ".../MU1326-lsd - P5089 A3/...") survive.
 add=0
+fold(){ unzip -nq "$1" '*.class' -d "$STAGE" 2>/dev/null || true; add=$((add+1)); }
 for src in "$@"; do
-  if [ -f "$src" ]; then jars="$src"
-  elif [ -d "$src" ]; then jars="$(find "$src" \( -name '*.jar' -o -name '*.zip' \) 2>/dev/null)"
-  else echo "  skip (not found): $src"; continue; fi
-  for j in $jars; do
-    unzip -nq "$j" '*.class' -d "$STAGE" 2>/dev/null || true   # -n: never clobber the lsd base
-    add=$((add+1))
-  done
+  if [ -f "$src" ]; then
+    fold "$src"
+  elif [ -d "$src" ]; then
+    while IFS= read -r -d '' j; do fold "$j"; done \
+      < <(find "$src" \( -name '*.jar' -o -name '*.zip' \) -print0 2>/dev/null)
+  else
+    echo "  skip (not found): $src"; continue
+  fi
 done
 rm -rf "$STAGE/META-INF"
 

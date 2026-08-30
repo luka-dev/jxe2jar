@@ -13,6 +13,7 @@ Folder = the firmware (full name). Each has its own `ext/` + `core-lsd.jar` + `j
 | `MHI2Q_US_AUG22_P5087_MU1316/` | MHI2Q | own (308) | own MU1316 lsd (1166) |
 | `MHI2_ER_VWG13_K4525_MU1367/`   | MHI2 | own (308) | own MU1367 lsd (1400) |
 | `MHI2_ER_AU37x_P5089_MU1326/` | MHI2 | **stand-in = MU1367** (308) | own MU1326 lsd (996) |
+| `MIBstd2_FW_0516/` | VW MIB std2 | j9jce (45) | **complete** jclFoundation11 (973, NOT a subset - plain jar from the build tree) |
 | `_generic-SE8/rt.jar` | (not firmware) | full Java SE 8 rt.jar (19991) - generic fallback, over-permissive | - |
 
 `ext` is ~99% J9-2.3-CDC-generic (MHI2Q MU1316 vs MHI2 MU1367 differ in only 2 classes,
