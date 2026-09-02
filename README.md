@@ -425,7 +425,7 @@ verifier or a decompiler rejects. This table is the map; each row links to the d
 | [Empty ROM strings](#empty-rom-strings--srccommonpy) | `common.py` | a zero-length `J9UTF8` read as padding returns the *next* pool entry |
 | [Float constant recovery](#float-constant-recovery--srcbytecodepy) | `bytecode.py` | ROM merges int/float -> ternary "no common supertype" |
 | [InnerClasses reconstruction](#innerclasses-reconstruction-from-real-rom-metadata--srcjxe2jarpy-srcjxepy) | `jxe2jar.py`, `jxe.py` | correct nesting + inline decompilation |
-| [EnclosingMethod](#enclosingmethod-attribute--srcjxe2jarpy-srcjxepy) | `jxe2jar.py`, `jxe.py` | anonymous/local classes inline into their method |
+| [EnclosingMethod](#enclosingmethod-attribute--srcjxe2jarpy-srcjxepy) | `jxe2jar.py`, `jxe.py` | anonymous/local classes inline into their method (`new` site recovers what the ROM erased) |
 | [Exceptions / `throws`](#exceptions-attribute--throws-clauses--srcjxe2jarpy) | `jxe2jar.py` | recover declared checked exceptions |
 | [Generics / `Signature`](#generics--signature-attribute--srcjxepy-srcjxe2jarpy) | `jxe.py`, `jxe2jar.py` | recover generic types at all three levels |
 
@@ -606,6 +606,19 @@ their enclosing method and resolves all of these. One residual VF artifact (`<un
 on a nested anonymous class's synthetic outer-`this` field) is cleaned by
 `tools/fix_vf_artifacts.py`.
 
+**The `new` site fills in what the romizer erased.** The ROM keeps the record for only a
+fraction of anonymous classes - on MU1316, 403 of 10701 - so the rest used to fall back to the
+name (`Outer$N` -> `Outer`, no method). But an anonymous class is instantiated *exactly once*,
+at its declaration site, so the single `new Outer$N` in the image names both the class it was
+declared in and the method. `build_anon_enclosing` (`jxe2jar.py`) scans every method body for
+`new` (`find_new_class_indices` in `bytecode.py`), resolves the ROM constant to a class name and
+keeps only unambiguous single-site hits. On MU1316 this takes `method_index == 0` from
+**10298 down to 668** and corrects 41 `class_index` values where the name prefix was the wrong
+outer (e.g. `java/util/HashMap$1` is declared in `HashMap$HashMapEntrySet`, not `HashMap`).
+A `<init>`/`<clinit>` site yields the class only, never the method: a field or instance
+initializer is compiled *into* the constructor and javac emits `method_index` 0 for those, so
+naming the constructor could lie. Covered by `test/test_anon_enclosing.py`.
+
 ### Exceptions attribute / `throws` clauses  (`src/jxe2jar.py`)
 J9 keeps each method's declared checked exceptions (`throw_exceptions`), which the converter used
 to drop - so decompiled methods showed no `throws`. The standard `Exceptions` attribute is now
@@ -650,11 +663,18 @@ The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** r
 2. Convert JAR -> JXE with `jar2jxe.exe` (see [`vms/xp/README.md`](vms/xp/README.md))
 3. Convert JXE -> JAR with Python: `python3 src/jxe2jar.py input.jxe output.jar`
 
+Plus two standalone unit checks (no framework, run them directly):
+`python3 test/test_rom_string.py` (J9UTF8 reader) and
+`python3 test/test_anon_enclosing.py` (anonymous-class `new`-site recovery).
+
 ## Usage Notes
 
 - Every class in the image is converted (including JDK / `java.*`); there is no skip list.
 - `EnclosingMethod` is synthesized for ROM-erased anon classes (`Outer$N`) by default so
   decompilers inline them; pass `--dont-infer-enclosing` to turn that off.
+- The JXE's non-`rom.classes` zip entries (properties, JSON config, `jxeLink.rules`, native
+  `.so` - 21 files on MU1316) are copied into the output jar; the ROM image is only its
+  class half.
 - `ACC_SYNTHETIC` is preserved by default; `--strip-synthetic` for strict `javap` on 45.0 classes.
 - Classfile versions are inferred from flags (minimum 46) and never exceed 49 (keeps every class
   on the stack-map-free inference verifier; see [Classfile version](#classfile-version--srcjxe2jarpy)).

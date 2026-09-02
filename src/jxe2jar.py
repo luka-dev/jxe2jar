@@ -24,7 +24,7 @@ import io
 import os
 import zipfile
 
-from bytecode import transform_bytecode
+from bytecode import find_new_class_indices, transform_bytecode
 from constpool import CONST, ConstPool
 from jxe import JXE, ConstType, ReaderStream, WriterStream
 
@@ -178,6 +178,49 @@ def build_inner_meta(classes):
     return meta, children
 
 
+def build_anon_enclosing(classes):
+    """Global map anonymous/local className -> (enclosing class, method name, method sig),
+    recovered from the `new Outer$N` that constructs it.
+
+    The J9 romizer keeps the EnclosingObject record for only a small fraction of
+    anonymous classes (on MU1316: 403 of 10701); for the rest the enclosing *method* is
+    lost and the enclosing *class* can only be guessed from the name prefix - which is
+    wrong whenever the anonymous class sits inside a nested class, since javac names it
+    after the top-level class (`Outer$3` declared in `Outer$Inner.run()`).  An anonymous
+    class is instantiated exactly once, at its declaration site, so the `new` that
+    mentions it gives both.  Sites that disagree are ambiguous and dropped rather than
+    guessed.
+
+    `<init>`/`<clinit>` sites yield the class only: a field or instance initializer is
+    compiled *into* the constructor, and javac emits method_index 0 for those, so the
+    constructor cannot be claimed as the enclosing method without possibly lying.
+    """
+    wanted = {rc.class_name for rc in classes if "$" in rc.class_name}
+    sites = {}
+    for rc in classes:
+        targets = {
+            i: c.value
+            for i, c in enumerate(rc.constant_pool)
+            if c.type == ConstType.CLASS and c.value in wanted
+        }
+        if not targets:
+            continue
+        for method in rc.methods:
+            if not method.bytecode:
+                continue
+            for index in find_new_class_indices(method.bytecode):
+                name = targets.get(index)
+                if name is None or name == rc.class_name:
+                    continue
+                if method.name in ("<init>", "<clinit>"):
+                    sites.setdefault(name, set()).add((rc.class_name, None, None))
+                else:
+                    sites.setdefault(name, set()).add(
+                        (rc.class_name, method.name, method.signature)
+                    )
+    return {name: next(iter(s)) for name, s in sites.items() if len(s) == 1}
+
+
 def _classes_in_descriptor(descriptor):
     """Yield every `Lpkg/Name;` internal class name inside a field/method descriptor."""
     if not descriptor:
@@ -274,7 +317,7 @@ def _build_inner_classes_attr(romclass, const_pool, inner_meta, children):
 
 def dump_romclass(
     stream, romclass, strip_synthetic: bool = False, inner_meta=None, children=None,
-    infer_enclosing: bool = False
+    infer_enclosing: bool = False, anon_enclosing=None
 ) -> tuple[ConstPool, list]:  # pylint: disable=R0914, R0915
     """Dumps romclass."""
     stream.write_raw_bytes(b"\xca\xfe\xba\xbe")
@@ -488,6 +531,9 @@ def dump_romclass(
     # it Vineflower treats each inner as an independent top-level class and cannot inline
     # anonymous classes or resolve their synthetic access$/constructor references.
     enclosing_attr = None
+    # `new` site of this class, when unambiguous: (enclosing class, method name, sig).
+    # See build_anon_enclosing - it fills in what the romizer erased.
+    site = (anon_enclosing or {}).get(romclass.class_name)
     if getattr(romclass, "has_enclosing_method", False) and getattr(
         romclass, "enclosing_class", None
     ):
@@ -497,6 +543,10 @@ def dump_romclass(
                 CONST.NAMEANDTYPE,
                 (romclass.enclosing_method_name, romclass.enclosing_method_sig),
             )
+        elif site and site[1]:
+            # ROM kept the record but not the method name; the `new` site has it. The
+            # ROM's own enclosing class stays authoritative.
+            method_index = const_pool.add(CONST.NAMEANDTYPE, (site[1], site[2]))
         enclosing_attr = {
             "attribute_name_index": const_pool.add(CONST.UTF8, "EnclosingMethod"),
             "class_index": const_pool.add(CONST.CLASS, romclass.enclosing_class),
@@ -512,10 +562,18 @@ def dump_romclass(
     if enclosing_attr is None and infer_enclosing:
         _base, _sep, _tail = romclass.class_name.rpartition("$")
         if _base and _tail.isdigit():
+            # The `new` site, when known, beats the name on both counts: it gives the
+            # class the anon was really declared in (which is not the `Outer$N` prefix
+            # when that class is itself nested) and the method.
+            _owner, _m_name, _m_sig = site if site else (_base, None, None)
             enclosing_attr = {
                 "attribute_name_index": const_pool.add(CONST.UTF8, "EnclosingMethod"),
-                "class_index": const_pool.add(CONST.CLASS, _base),
-                "method_index": 0,
+                "class_index": const_pool.add(CONST.CLASS, _owner),
+                "method_index": (
+                    const_pool.add(CONST.NAMEANDTYPE, (_m_name, _m_sig))
+                    if _m_name
+                    else 0
+                ),
             }
 
     # Class-level generic Signature (JVMS 4.7.9): the J9 romizer keeps it (optional
@@ -622,7 +680,7 @@ def dump_romclass(
 
 def create_class(
     romclass, jarfile, strip_synthetic: bool = False, inner_meta=None, children=None,
-    infer_enclosing: bool = False
+    infer_enclosing: bool = False, anon_enclosing=None
 ) -> None:
     """Creates class"""
     class_name = romclass.class_name
@@ -631,7 +689,8 @@ def create_class(
     stream = WriterStream(f_stream)
     res = dump_romclass(
         stream, romclass, strip_synthetic=strip_synthetic, inner_meta=inner_meta,
-        children=children, infer_enclosing=infer_enclosing
+        children=children, infer_enclosing=infer_enclosing,
+        anon_enclosing=anon_enclosing
     )
     stream.write()
     jarfile.writestr(class_file, f_stream.getvalue())
@@ -644,13 +703,26 @@ def _create_jar(
     jxe,
     strip_synthetic=False,
     infer_enclosing=True,
+    jxe_path=None,
 ):
     with zipfile.ZipFile(jar_name, "w") as jar_zipfile:
         total = len(jxe.image.classes)
         written = 0
 
+        # The JXE zip carries payload beside rom.classes (properties, JSON config,
+        # jxeLink.rules, native .so); the ROM image is only its class half, so copy
+        # the rest through instead of dropping it.
+        if jxe_path:
+            with zipfile.ZipFile(jxe_path) as src_zip:
+                for info in src_zip.infolist():
+                    if info.is_dir() or info.filename == "rom.classes":
+                        continue
+                    jar_zipfile.writestr(info.filename, src_zip.read(info.filename))
+
         # Global nesting map from real ROM fields, used to reconstruct InnerClasses.
         inner_meta, children = build_inner_meta(jxe.image.classes)
+        # Enclosing class+method of anonymous classes, from their `new` site.
+        anon_enclosing = build_anon_enclosing(jxe.image.classes)
 
         for idx, romclass in enumerate(jxe.image.classes, 1):
             print(f"[{idx}/{total}] {romclass.class_name}")
@@ -662,6 +734,7 @@ def _create_jar(
                     inner_meta=inner_meta,
                     children=children,
                     infer_enclosing=infer_enclosing,
+                    anon_enclosing=anon_enclosing,
                 )
                 written += 1
             except Exception as exc:  # pylint: disable=W0718
@@ -704,6 +777,7 @@ Examples:
             jxe,
             strip_synthetic=args.strip_synthetic,
             infer_enclosing=args.infer_enclosing,
+            jxe_path=args.jxe_file,
         )
 
 

@@ -25,7 +25,7 @@ python3 src/jxe2jar.py input.jxe output.jar --dont-infer-enclosing
 
 | Flag | Description |
 |------|-------------|
-| (default) | Every class is converted; `EnclosingMethod` is synthesized for ROM-erased anon classes (`Outer$N`) so decompilers inline them |
+| (default) | Every class is converted; the JXE's non-`rom.classes` entries are copied through; `EnclosingMethod` is synthesized for ROM-erased anon classes (`Outer$N`) - enclosing class and method taken from the `new` site when unambiguous - so decompilers inline them |
 | `--strip-synthetic` | Clear `ACC_SYNTHETIC` on classes/methods/fields (for strict javap) |
 | `--dont-infer-enclosing` | Turn off the default `EnclosingMethod` synthesis |
 

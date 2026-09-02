@@ -359,6 +359,23 @@ def _j9_instr_size(bytecode, i):
     return 1
 
 
+def find_new_class_indices(bytecode):
+    """ROM constant-pool indices of every `new` in *bytecode*.
+
+    Used to locate the `new Outer$N` site that names an anonymous class's enclosing
+    method: the J9 romizer drops the EnclosingObject record for most anonymous classes,
+    but an anonymous class is instantiated only at its declaration site, so the single
+    `new` that mentions it identifies the class (and method) it was declared in.
+    """
+    indices = []
+    i = 0
+    while i < len(bytecode):
+        if bytecode[i] == JBOpcode.JBnew and i + 3 <= len(bytecode):
+            indices.append(struct.unpack("<H", bytecode[i + 1 : i + 3])[0])
+        i += _j9_instr_size(bytecode, i)
+    return indices
+
+
 def _parse_param_types(descriptor):
     """Parse a method descriptor and return a list of single-char type indicators.
 
