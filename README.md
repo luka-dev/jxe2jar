@@ -400,14 +400,21 @@ The repair passes that run after decompilation (`fix_vf_artifacts.py`, `int2hex.
 ## How conversion works
 
 The converter parses a JXE image into per-class ROM structures, then reassembles each into a
-standard `.class`. Most of that is a mechanical 1:1 mapping across four modules:
+standard `.class`. Most of that is a mechanical 1:1 mapping across four modules. Two things sit
+outside the per-class loop: an image-wide pre-pass that reads nesting from the ROM
+(`build_inner_meta`) and finds each anonymous class's `new` site (`build_anon_enclosing`), and the
+JXE's non-`rom.classes` zip entries, which are payload and are copied to the jar untouched:
 
 ```mermaid
 flowchart TD
-    A["JXE bytes"] -->|"jxe.py<br/>parse ROM structs"| B["per-class J9ROMClass<br/>(fields, methods, optinfo)"]
+    Z["JXE zip"] -->|"rom.classes"| A["ROM image bytes"]
+    Z -.->|"every other entry<br/>(properties, JSON, .so) copied as-is"| F
+    A -->|"jxe.py<br/>parse ROM structs"| B["per-class J9ROMClass<br/>(fields, methods, optinfo)"]
+    B -->|"image-wide pre-pass<br/>build_inner_meta / build_anon_enclosing"| M["nesting map +<br/>anon class new-sites"]
     B -->|"constpool.py<br/>rebuild constant pool"| C["standard constant pool"]
     B -->|"bytecode.py<br/>translate J9 opcodes"| D["JVM bytecode"]
-    C --> E["jxe2jar.py<br/>assemble .class + attributes"]
+    M --> E["jxe2jar.py<br/>assemble .class + attributes"]
+    C --> E
     D --> E
     E --> F[".jar"]
 ```
