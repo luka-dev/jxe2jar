@@ -237,22 +237,7 @@ def create_file_path(filepath: str) -> None:
 
 
 def _is_valid_string(s: str) -> bool:
-    """Check if a string is valid for use in constant pool (no excessive control chars)."""
-    if not s:
-        return True  # Empty string is valid
-
-    # Count null bytes and control characters
-    null_count = s.count('\x00')
-    control_count = sum(1 for c in s if ord(c) < 32 and c not in '\n\r\t')
-
-    # Reject if more than 10% null bytes or control chars
-    if null_count > len(s) * 0.1 or control_count > len(s) * 0.1:
-        return False
-
-    # Reject if string starts with null or control chars (common in corrupted data)
-    if s[0] in '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f':
-        return False
-
+    """Check if a string is valid. We allow all valid UTF-8 strings to support packed DFA tables."""
     return True
 
 
