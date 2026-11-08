@@ -171,12 +171,51 @@ per-file Java source level. It includes all compiler dependencies in `libs/`.
 The converter now preserves `ACC_SYNTHETIC` on captured `this$N` and `val$...` fields, so
 Vineflower reconstructs anonymous captures from bytecode metadata without source rewriting.
 This smaller postprocessor handles separate rendering errors: `<unrepresentable>` on standalone
-classes, keyword-derived variable names, duplicate intersection casts, raw `toArray(T[])`
-assignments, and old-compiler `class$(String)` calls and cache expressions.
+classes, keyword-derived variable names, duplicate intersection casts, raw `toArray(T[])` calls in
+any position, old-compiler `class$(String)` calls and both cache-ternary orders
+(`f == null ? (f = X.class) : f` and javac 1.1's `f != null ? f : (f = X.class)`), and the
+diamond `new X<>()` Vineflower writes even into 1.4 code (Java 7 syntax, raw call on 1.5).
 
 ```sh
 python3 tools/fix_vf_artifacts.py out/final-vf            # report
 python3 tools/fix_vf_artifacts.py out/final-vf --apply    # <unrepresentable> -> Object, etc.
+```
+
+### `fix_javac_casts.py`
+
+Decompiling pre-generics bytecode, Vineflower leaves out casts it believes redundant, and javac
+answers "incompatible types: Object cannot be converted to T" (or `Object[]` -> `T[]`). The tool
+compiles every file alone (`--cp` = the decompiled jar and its dependencies, `--bootclasspath` =
+the firmware JCL) and repairs only the reported lines, placing the cast where javac's caret says
+the offending expression is:
+
+```java
+for (Object name_ : names) {                 // was: for (String name : names) {
+    String name = (String) name_;
+s = (String) AccessController.doPrivileged(new PrivilegedAction() { ... });
+return list.isEmpty() ? null : (String[]) list.toArray(EMPTY);
+int v = (Integer) raw.get(0);                // primitives go through the wrapper
+```
+
+Files that compile are never touched; `--only-failing report.json` restricts the run to an
+isolated-compile report's failures. Found by the round-trip corpus oracle, where these two shapes
+were the largest remaining failure classes after `fix_vf_artifacts.py`.
+
+```sh
+python3 tools/fix_javac_casts.py out/final-vf --cp out/final.jar --bootclasspath libs/jcl/<FW>/jcl.jar --apply
+```
+
+### `decompile_oracle.py`
+
+Measures the decompile stage against ground truth. Takes a javac-built jar (with
+`LocalVariableTable`) and its jar2jxe -> jxe2jar round trip (without), decompiles both with
+`vineflower.sh` (with `--fix` it runs `fix_vf_artifacts.py` + `fix_javac_casts.py` first),
+compiles every file alone against the original jar, and compares the recompiled methods
+(`rtdiff.py` normalisation). Reports what fails only without the LVT, what fails on both sides,
+and the top javac error categories. Used on the 16-jar corpus (README, "Round-trip corpus").
+
+```sh
+python3 tools/decompile_oracle.py --orig orig.jar --rt roundtrip.jar --out out/oracle/foo --fix
 ```
 
 ### `repair_unreachable_clone_catches.py`

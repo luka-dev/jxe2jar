@@ -65,3 +65,31 @@ public class Outer {
 
 if __name__ == "__main__":
     test_remaining_repairs_compile_and_run()
+
+
+def test_diamond_becomes_raw_constructor():
+    src = "List a = new ArrayList<>(Arrays.asList(X));\nMap<String, List<Integer>> m = new java.util.HashMap<>();\nnew Foo<>();"
+    fixed, n = fix_text(src)
+    assert n == 3 and "<>" not in fixed
+    assert "new ArrayList(Arrays.asList(X))" in fixed and "new java.util.HashMap()" in fixed and "new Foo()" in fixed
+    assert fix_text(fixed)[0] == fixed
+
+
+def test_inverted_class_dollar_cache():
+    src = ("if (m != null\n    && (class$com$x$Y != null\n        ? class$com$x$Y\n        : (\n"
+           "            class$com$x$Y = com.x.Y.class\n        ))\n    .isAssignableFrom(m.getClass())) {}")
+    fixed, n = fix_text(src)
+    assert n == 1 and "class$" not in fixed and "(com.x.Y.class)" in fixed, fixed
+
+
+def test_toarray_cast_in_any_position():
+    src = ("String[] a = list.toArray(new String[0]);\n"
+           "return x.isEmpty() ? null : x.toArray(new String[x.size()]);\n"
+           "return this.classes.values().toArray(new ClassStats[0]);\n"
+           "return (String[]) done.toArray(new String[0]);\n")
+    fixed, n = fix_text(src)
+    assert "a = (String[]) list.toArray(new String[0])" in fixed
+    assert ": (String[]) x.toArray(new String[x.size()])" in fixed
+    assert "return (ClassStats[]) this.classes.values().toArray(new ClassStats[0])" in fixed
+    assert fixed.count("(String[]) done.toArray") == 1 and n == 3, fixed
+    assert fix_text(fixed)[0] == fixed

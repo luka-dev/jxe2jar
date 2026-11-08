@@ -31,7 +31,8 @@ tools/uninline/build.sh                                                     # on
 python3 src/jxe2jar.py in.jxe out/base.jar                                 # convert
 tools/combine.sh out/base.jar out/combined.jar --appimg <APPIMG>           # + bundles & app jars
 tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
-bash tools/vineflower.sh out/final.jar out/final-vf                        # decompile
+python3 tools/donor_lvt.py apply out/final.jar libs/donor/mh2p-lvt.json.gz -o out/final-lvt.jar  # names from MH2p
+bash tools/vineflower.sh out/final-lvt.jar out/final-vf                    # decompile
 python3 tools/nav_index.py out/final.jar out/nav                           # navigation index
 ```
 
@@ -103,6 +104,7 @@ instead of a wall of magic numbers.
 6. **Repair artifacts, index:**
    ```
    python3 tools/fix_vf_artifacts.py  out/final-vf --apply             # remaining VF rendering errors
+   python3 tools/fix_javac_casts.py   out/final-vf --cp out/final.jar --bootclasspath libs/jcl/<FW>/jcl.jar --apply
    python3 tools/int2hex.py           out/final-vf --apply             # hex bitmasks/flags
    python3 tools/nav_index.py         out/final.jar out/nav            # who-uses / what-is-N index
    ```
@@ -245,7 +247,8 @@ tools/uninline/build.sh                                       # build uninline.j
 python3 src/jxe2jar.py in.jxe out/base.jar                                 # convert (all classes)
 tools/combine.sh out/base.jar out/combined.jar --appimg <APPIMG>          # + bundles & app jars
 tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
-bash tools/vineflower.sh out/final.jar out/final-vf                        # decompile
+python3 tools/donor_lvt.py apply out/final.jar libs/donor/mh2p-lvt.json.gz -o out/final-lvt.jar  # names from MH2p
+bash tools/vineflower.sh out/final-lvt.jar out/final-vf                    # decompile
 python3 tools/nav_index.py  out/final.jar out/nav                          # navigation index
 # QA (optional):  tools/uninline/uninline.sh audit out/final.jar
 ```
@@ -822,6 +825,19 @@ all annotations, `ConstantValue` on final *instance* fields (static ones are kep
 change, not a loss. For decompilation the one that matters is the `LocalVariableTable`: with it
 gone Vineflower declares `ArrayList arraylist` where the source said `List list`, widens `short`
 locals to `int`, adds casts, and occasionally picks `Object` for a `String`.
+
+**Decompiler oracle** (`tools/decompile_oracle.py`): the same corpus also measures the decompile
+stage, because here the original source structure *and* a `LocalVariableTable` are known.
+Both the original jar and its round trip are decompiled with `tools/vineflower.sh`, every file
+is compiled alone against the original jar at `-source 1.5`, and the recompiled methods are
+compared. Of 3500 round-trip files, raw Vineflower output compiles for 2704 (77%); the missing
+LVT accounts for only 9 of the failures (readability, not compilability), ~290 are missing
+third-party dependencies, and the rest were decompiler defects that hit firmware code just the
+same: `class$` literal leftovers (150), `new X<>()` diamonds in 1.4 code (138), raw
+`for (String s : list)` loops (91) and casts dropped around `doPrivileged`/`toArray`/`get`
+results (42). With `fix_vf_artifacts.py` (three new rules) and `fix_javac_casts.py` the
+round-trip trees compile for 3043 files (87%, 95% of those whose dependencies exist), and
+27786 of 28223 recompiled methods are identical to the recompiled LVT-side source.
 
 This corpus is what found the six defects fixed in November 2026 (string constants over 10 KB,
 `throws` on natives, trailing `nop` padding, a `ConstantValue` heuristic, `super_class` of

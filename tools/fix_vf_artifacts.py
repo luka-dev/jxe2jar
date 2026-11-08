@@ -34,9 +34,17 @@ DUP_INTERSECTION = re.compile(r"\(\s*([A-Za-z_$][\w$.]*)\s*&\s*\1\s*\)")
 
 # A raw List.toArray(T[]) is typed Object[] even though its result has runtime
 # type T[]. The explicit cast restores the assignability of the decompiled code.
+# Any receiver (field chain, this.x, no-arg call chain) in any expression position, unless a cast
+# already precedes it: `cond ? null : list.toArray(new T[0])`, `map.values().toArray(new T[0])`.
 TOARRAY_CAST = re.compile(
-    r"(?<![=!<>+\-*/&|^%~])(=|\breturn)(\s+)([A-Za-z_][\w.$]*)\.toArray\(\s*new\s+([\w.$]+)\["
+    r"(?<![\w.$\]])(?<!\]\) )((?:[A-Za-z_$][\w$]*(?:\(\))?\.)*[A-Za-z_$][\w$]*(?:\(\))?)\.toArray\(\s*new\s+([\w.$]+)\["
 )
+
+# Vineflower writes `new ArrayList<>()` whenever it can see the element type (via the JDK
+# runtime it resolves against), also in classfile-version 46-49 code; the diamond is Java 7
+# syntax and fails every -source 1.5 check (126 occurrences in 19 MU1316 files). The raw
+# constructor call compiles on 1.5 with at most an unchecked warning.
+DIAMOND = re.compile(r"\bnew(\s+[A-Za-z_$][\w$.]*)<>\(")
 
 # Old compiler class-literal helper calls can survive when Vineflower omits the
 # helper definition. Accept only quoted Java binary names.
@@ -47,6 +55,12 @@ CLASS_DOLLAR_CACHE = re.compile(
     r"(?P<field>(?:[A-Za-z_$][\w$]*\.)?class\$[\w$]+)\s*==\s*null\s*"
     r"\?\s*\(\s*(?P=field)\s*=\s*(?P<literal>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\.class)\s*\)\s*"
     r":\s*(?P=field)"
+)
+# The same cache with the branches the other way round, as javac 1.1/1.2 (InstallShield, dom4j)
+# compiled it: `f != null ? f : (f = X.class)`; Vineflower spreads it over several lines.
+CLASS_DOLLAR_CACHE_NE = re.compile(
+    r"(?P<field>(?:[A-Za-z_$][\w$]*\.)?class\$[\w$]+)\s*!=\s*null\s*\?\s*(?P=field)\s*:\s*"
+    r"\(\s*(?P=field)\s*=\s*(?P<literal>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\.class)\s*\)"
 )
 
 
@@ -80,7 +94,8 @@ def fix_class_dollar_literals(text):
         lambda match: match.group(1).replace("$", ".") + ".class", text
     )
     text, caches = CLASS_DOLLAR_CACHE.subn(lambda match: match.group("literal"), text)
-    return text, calls + caches
+    text, caches_ne = CLASS_DOLLAR_CACHE_NE.subn(lambda match: match.group("literal"), text)
+    return text, calls + caches + caches_ne
 
 
 def fix_text(text):
@@ -88,11 +103,12 @@ def fix_text(text):
     text = text.replace(TOKEN, "Object")
     text, keywords = KEYWORD_PARAM.subn(lambda m: f"{m.group(1)} {m.group(2)}_", text)
     text, intersections = DUP_INTERSECTION.subn(r"(\1)", text)
-    text, arrays = TOARRAY_CAST.subn(r"\1\2(\4[]) \3.toArray(new \4[", text)
+    text, arrays = TOARRAY_CAST.subn(r"(\2[]) \1.toArray(new \2[", text)
+    text, diamonds = DIAMOND.subn(r"new\1(", text)
     text, outers = fix_dangling_outer_field(text)
     text, params = fix_navigation_param_alias(text)
     text, literals = fix_class_dollar_literals(text)
-    return text, n + keywords + intersections + arrays + outers + params + literals
+    return text, n + keywords + intersections + arrays + diamonds + outers + params + literals
 
 
 def main():
