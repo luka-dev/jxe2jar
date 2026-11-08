@@ -738,6 +738,55 @@ The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** r
 `jar2jxe.exe` is a **WinCE ARM** binary (`j9jar2jxe23.dll` -> `j9bcutil_createRomClass`): it
 only runs in the WM5 Device Emulator inside the XP VM; `tools/wm5/` drives that VM headlessly.
 
+### Round-trip corpus: real jars as the oracle
+
+The same round trip on real-world jars, compared class by class with `tools/rtdiff.py` (own
+classfile parser: attribute census, flags, `ConstantValue`/`Exceptions`/`InnerClasses`/
+`EnclosingMethod` content, and every method's bytecode with constant-pool symbols resolved and
+branch targets as instruction indices, so `ldc`/`ldc_w` and layout differences do not count),
+plus JDK 8 `-Xverify:all` on both sides: a class that fails only on the round-trip side is a
+converter defect, one that fails on both just lacks a dependency. 16 jars, ~4.5k classes, five
+compiler generations (javac 1.1 .. 1.6 and ecj):
+
+| jar (major) | classes | methods with code | bytecode identical | verify failures only on round trip |
+|---|---|---|---|---|
+| qnx installer (45) | 1171 | 10151 | 10098 (53 `jsr` methods) | 0 |
+| guava 10.0.1 (49) | 1164 | 8452 | 8452 | 0 |
+| commons-collections 3.2.2 (47) | 460 | 4091 | 4091 | 0 |
+| equinox osgi 3.3 (46, ecj) | 435 | 3483 | 3483 | 0 |
+| junit 4.13.2 (49) | 350 | 1786 | 1786 | 0 |
+| dom4j 1.1 (45) | 333 | 3309 | 3307 (2 `jsr`) | 0 |
+| velocity 1.7 (48) | 270 | 2060 | 2050 (10 `jsr`) | 0 |
+| antlr 2.7.2 (45) | 193 | 2102 | 2100 (2 `jsr`) | 0 |
+| struts-core 1.3.8 (48) | 150 | 1525 | 1525 | 0 |
+| commons-lang 2.6 (47) | 133 | 2343 | 2343 | 0 |
+| dsi2gen (46/49) | 116 | 1205 | 1205 | 0 |
+| commons-beanutils 1.7.0 (46) | 111 | 979 | 979 | 0 |
+| commons-digester 1.8 (46) | 100 | 642 | 639 (3 `jsr`) | 0 |
+| equinox common / jobs 3.3 (45, ecj), kxml2 2.3 (46) | 114 | 1037 | 1037 | 0 |
+| edge cases (46) | 55 | 203 | 203 | 0 |
+
+43298 of 43368 methods come back opcode-for-opcode identical; the other 70 are the ones javac
+<= 1.4 compiled with `jsr`/`ret` subroutines (`finally`), which the romizer inlines before it
+writes the ROM - equivalent code, no way back. `Exceptions`, static `ConstantValue`, `Signature`
+(5252 of them) and `EnclosingMethod` (incl. the enclosing method's name) match the originals
+exactly; 6910 `throws` clauses, 3741 constants, 0 differences.
+
+What the romizer strips for good (identical across all 16 jars, nothing to recover):
+`SourceFile`, `LineNumberTable`, `LocalVariableTable`/`LocalVariableTypeTable`, `Deprecated`,
+all annotations, `ConstantValue` on final *instance* fields (static ones are kept), the
+`InnerClasses` entries for *foreign* nested classes a class merely references
+(`java/util/Map$Entry`), and the inner-class access flags (the converter derives them). The
+`Synthetic` attribute of javac <= 1.4 comes back as the `ACC_SYNTHETIC` flag - a representation
+change, not a loss. For decompilation the one that matters is the `LocalVariableTable`: with it
+gone Vineflower declares `ArrayList arraylist` where the source said `List list`, widens `short`
+locals to `int`, adds casts, and occasionally picks `Object` for a `String`.
+
+This corpus is what found the six defects fixed in November 2026 (string constants over 10 KB,
+`throws` on natives, trailing `nop` padding, a `ConstantValue` heuristic, `super_class` of
+`Object`, and the two classfile-version rules `ldc CONSTANT_Class` / `package-info`). To rerun:
+romize with `host.py jar2jxe`, convert, then `python3 tools/rtdiff.py original.jar roundtrip.jar`.
+
 ## Usage Notes
 
 - Every class in the image is converted (including JDK / `java.*`); there is no skip list.
