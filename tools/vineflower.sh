@@ -44,9 +44,22 @@ fi
 REMOVE_SYNTHETIC=true
 [ -n "$VF_KEEP_SYNTHETIC" ] && REMOVE_SYNTHETIC=false
 
+# Variable names: with tools/vf-lvt-first-renamer.jar (built by tools/vf-plugin/build.sh) the
+# LocalVariableTable names grafted by tools/donor_lvt.py survive and only unnamed variables get
+# JAD-style names; VF's own jad renamer (--variable-renaming=jad --rename-parameters=true) would
+# rename the LVT-named ones too. Without the plugin jar, fall back to the jad renamer.
+PLUGIN_JAR="$ROOT/tools/vf-lvt-first-renamer.jar"
+if [ -f "$PLUGIN_JAR" ] && [ -z "$VF_NO_LVT_PLUGIN" ]; then
+  launch=(-cp "$VF_JAR:$PLUGIN_JAR" org.jetbrains.java.decompiler.main.decompiler.ConsoleDecompiler)
+  renaming=()
+else
+  launch=(-jar "$VF_JAR")
+  renaming=(--variable-renaming=jad --rename-parameters=true)
+fi
+
 # All --flag=value options first
 args=(
-  "$JAVA_BIN" "-Xmx${VF_XMX:-30g}" -jar "$VF_JAR"
+  "$JAVA_BIN" "-Xmx${VF_XMX:-30g}" "${launch[@]}"
   "--decompile-generics=${VF_DECOMPILE_GENERICS:-true}"
   --decompile-enums=true
   --decompile-assert=true
@@ -73,8 +86,7 @@ args=(
   --ignore-invalid-bytecode=true
   --decompiler-comments=true
   --dump-bytecode-on-error=true
-  --variable-renaming=jad
-  --rename-parameters=true
+  "${renaming[@]}"
   "--banner="
   "--indent-string=    "
   --preferred-line-length=120

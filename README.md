@@ -719,6 +719,47 @@ type-based names - a hard ROM limit, not a converter gap.
 - **Flags:** `--strip-synthetic` clears `ACC_SYNTHETIC` on classes/methods/fields for strict
   tooling (preserved by default).
 
+## Donor names: LocalVariableTable from MH2p  (`tools/donor_lvt.py`, `libs/donor/`)
+
+The romizer strips the `LocalVariableTable`, and with it every local and parameter name and the
+*declared* type of every local (see the round-trip corpus below: Vineflower then writes
+`ArrayList arraylist` for `List list`). The JXE itself has no way back - but the MH2p head units
+ship the same `eso/hmi/lsd` code **non-romized and compiled with `-g`**
+(`Firmwares/HU/MH2p_*/extracted/app/eso/hmi/lsd/lsd.jar`, major 48, LVT in ~60% of classes), and
+their code base overlaps MU1316's: 14080 class names, 84816 methods, 66151 of them with identical
+bytecode.
+
+`libs/donor/mh2p-lvt.json.gz` is a database distilled from the three MH2p jars (64898 classes,
+525803 method records, one per distinct bytecode per method, 16 MB): for every method the sha1 of
+its symbolic instruction list (constant-pool entries resolved, so pool layout and `ldc`/`ldc_w`
+do not matter) and its LVT entries keyed by *instruction index*. Applying it to a converted jar:
+
+```sh
+python3 tools/donor_lvt.py apply out/MU1316-base.jar libs/donor/mh2p-lvt.json.gz -o out/MU1316-lvt.jar
+```
+
+- a method whose bytecode fingerprint matches a donor record gets the **whole LVT** (names and
+  declared types, pcs remapped through instruction indices) - 37216 methods on MU1316;
+- a method that only matches by name + descriptor gets the **parameter names** (the LVT rows at
+  pc 0 in argument slots depend on the signature alone) - 13104 more;
+- every touched class gets its `SourceFile` back (6233 classes).
+
+Coverage by package on MU1316: `de/audi` 17% of methods, `de/vw` 56%, `com/ibm`, `edu/emory`,
+`java/util` ~99%; `de/esolutions` and `org/dsi` 0% - the MH2p build of those has no `-g:vars`, so
+there is nothing to donate. HotSpot validates LVT ranges on load, so `-Xverify:all` doubles as the
+check that every graft is well-formed (MU1316: unchanged 30217 ok / 326 environmental).
+`tools/donor_lvt.py build <lsd.jar ...> -o DB` rebuilds the database (1 minute); without
+`--no-lines` it also carries `LineNumberTable`s (28 MB).
+
+Vineflower reads the names through `--use-lvt-names=true`, but its bundled JAD renamer
+(`--variable-renaming=jad --rename-parameters=true`, which `tools/vineflower.sh` used for readable
+`var1`-free output) renames *every* variable - the renamer API hands a provider the variable's
+type, never its current name, and applies whatever comes back. `tools/vf-plugin/` is a 100-line
+Vineflower plugin (`tools/vf-lvt-first-renamer.jar`, build with `tools/vf-plugin/build.sh` and a
+JDK 17) whose provider skips every slot the method's `LocalVariableTable` names and gives
+JAD-style names only to the rest; `vineflower.sh` puts it on the classpath and drops the two
+renaming options when the jar is present (`VF_NO_LVT_PLUGIN=1` restores the old behaviour).
+
 ## Testing Workflow
 
 The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** round-trip:
