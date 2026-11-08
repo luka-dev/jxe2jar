@@ -60,5 +60,8 @@ rm -rf "$STAGE/META-INF"
 # 3) repack (OUT is absolute)
 cls=$(find "$STAGE" -name '*.class' | wc -l | tr -d ' ')
 ( cd "$STAGE" && jar cf "$OUT" . )
+# 4) javac < 1.5 bundle classes carry no EnclosingMethod; without it Vineflower emits every
+#    anonymous class as a standalone Outer$N.java (dangling this$0, private access). Add it here.
+python3 "$(cd "$(dirname "$0")" && pwd)/add_enclosing_method.py" "$OUT" -o "$OUT.em" && mv "$OUT.em" "$OUT"
 
 echo "combined: $cls classes from base + $add source jars -> $OUT"

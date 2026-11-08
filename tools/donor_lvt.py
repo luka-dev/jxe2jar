@@ -22,7 +22,7 @@ import sys
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rtdiff import R, code, cp_bytes, norm, parse, walk  # noqa: E402
+from rtdiff import R, code, norm, parse, serialize, walk  # noqa: E402
 
 
 def _fingerprint(bc, cp):
@@ -154,16 +154,8 @@ def graft(data, donor, st):
         class_attrs.append(("SourceFile", struct.pack(">H", utf_idx(donor["sf"])))); changed = True; st["classes: SourceFile"] += 1
     if not changed: return data
 
-    def attr_bytes(lst):
-        return struct.pack(">H", len(lst)) + b"".join(struct.pack(">HI", utf_idx(n), len(d)) + d for n, d in lst)
-
-    # body first: attr_bytes may still intern attribute names; the pool is written last
-    body = bytearray(struct.pack(">HHHH", c["acc"], c["this_idx"], c["super_idx"], len(c["iface_idx"])) + b"".join(struct.pack(">H", i) for i in c["iface_idx"]))
-    body += struct.pack(">H", len(c["fields"])) + b"".join(struct.pack(">HHH", f["acc"], f["ni"], f["di"]) + attr_bytes(f["attrs"]) for f in c["fields"].values())
-    body += struct.pack(">H", len(methods_out)) + b"".join(struct.pack(">HHH", m["acc"], m["ni"], m["di"]) + attr_bytes(a) for m, a in methods_out)
-    body += attr_bytes(class_attrs)
     st["classes changed"] += 1
-    return struct.pack(">IHHH", 0xCAFEBABE, c["minor"], c["major"], len(entries)) + cp_bytes(entries) + bytes(body)
+    return serialize(c, methods_out, class_attrs)
 
 
 def apply(in_jar, db_path, out_jar):

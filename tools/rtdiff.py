@@ -91,6 +91,27 @@ def cp_bytes(entries):
     return bytes(out)
 
 
+def serialize(c, methods, class_attrs):
+    """Re-serialize a parse()d class. `methods` = [(method dict, attrs)], attrs = [(name, bytes)].
+    Attribute names are interned into c['cp'].e on the way, so the body is built first and the
+    pool written last (otherwise: "Attribute name has bad constant pool index")."""
+    entries = c['cp'].e
+    utf = {e[1]: i for i, e in enumerate(entries) if e and e[0] == 'utf8'}
+
+    def utf_idx(name):
+        if name not in utf: entries.append(('utf8', name)); utf[name] = len(entries) - 1
+        return utf[name]
+
+    def attr_bytes(lst):
+        return struct.pack('>H', len(lst)) + b''.join(struct.pack('>HI', utf_idx(n), len(d)) + d for n, d in lst)
+
+    body = bytearray(struct.pack('>HHHH', c['acc'], c['this_idx'], c['super_idx'], len(c['iface_idx'])) + b''.join(struct.pack('>H', i) for i in c['iface_idx']))
+    body += struct.pack('>H', len(c['fields'])) + b''.join(struct.pack('>HHH', f['acc'], f['ni'], f['di']) + attr_bytes(f['attrs']) for f in c['fields'].values())
+    body += struct.pack('>H', len(methods)) + b''.join(struct.pack('>HHH', m['acc'], m['ni'], m['di']) + attr_bytes(a) for m, a in methods)
+    body += attr_bytes(class_attrs)
+    return struct.pack('>IHHH', 0xCAFEBABE, c['minor'], c['major'], len(entries)) + cp_bytes(entries) + bytes(body)
+
+
 def parse(b):
     r = R(b)
     assert r.u4() == 0xCAFEBABE

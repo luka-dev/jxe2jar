@@ -70,6 +70,11 @@ instead of a wall of magic numbers.
    `eso/bundles_prod`, `eso/hmi/lsd/jars` (lsd wins name collisions). Folding them in *before*
    the un-inliner gives cross-corpus constant recovery and lets Vineflower resolve all app code
    intra-jar (no `--add-external` for it). Skip if you only want the bare lsd.
+   The bundle jars were built by javac 1.1-1.4, which never wrote `EnclosingMethod`; without it
+   Vineflower emits every anonymous class as a standalone `Outer$N.java` with a dangling `this$0`
+   (MU1316: 631 files, 507 of them not compiling, 45% of all compile failures). `combine.sh` therefore
+   ends with `tools/add_enclosing_method.py`, which recovers the enclosing class and method from the
+   single `new Outer$N` site exactly as the converter does for ROM classes (644 classes on MU1316, 3 s).
 
 3. **Graft local-variable names from the MH2p donors**, then **recover inlined constant names**
    with the ASM un-inliner - both **before decompiling**:
@@ -112,7 +117,7 @@ instead of a wall of magic numbers.
 6. **Repair artifacts, index:**
    ```
    python3 tools/fix_vf_artifacts.py  out/final-vf --apply             # remaining VF rendering errors
-   python3 tools/fix_javac_casts.py   out/final-vf --cp out/final.jar --bootclasspath libs/jcl/<FW>/jcl.jar --apply
+   python3 tools/fix_javac_casts.py   out/final-vf --cp out/final.jar --apply   # JDK runtime, not the firmware JCL (see tools/README)
    python3 tools/int2hex.py           out/final-vf --apply             # hex bitmasks/flags
    python3 tools/nav_index.py         out/final.jar out/nav            # who-uses / what-is-N index
    ```
@@ -764,12 +769,17 @@ and without the graft. Note that the un-inlined jar itself is decompile-only: in
 HotSpot rejects ("Illegal use of nonvirtual function call", 1303 classes on MU1316) - verify the
 converter's base jar, not the un-inlined one.
 
-End to end on MU1316 (converter, donor, renamer plugin, `fix_vf_artifacts`, `fix_javac_casts`,
-compile-gated chain) against the previous pipeline on the same tree of 21249 sources: isolated
-compile at a uniform `-source 1.5` 19799 -> 20122 (336 files fixed, 13 regressions, all in
-JCL/crypto classes where a donor slot type or a clone-catch repair disagrees with the body),
-version-aware 19719 -> 19983, `new X<>()` 126 -> 0, `varN` names 236 -> 146, generic JAD names
-(`obj`, `object3`) 23681 -> 15786 - the rest are real names from the donor.
+End to end on MU1316 (converter, donor, renamer plugin, `EnclosingMethod` for the bundle jars'
+anonymous classes, `fix_vf_artifacts`, `fix_javac_casts`, compile-gated chain) against the previous
+pipeline: the tree shrinks from 21249 to 20618 sources (631 standalone `Outer$N.java` fold into
+their outer classes), isolated compile at a uniform `-source 1.5` goes from 19799/21249 (93.2%) to
+20291/20618 (98.4%, failures 1450 -> 327), version-aware from 19719 to 19857 (failures 1530 -> 761),
+`new X<>()` 126 -> 0, `varN` names 236 -> 145, generic JAD names (`obj`, `object3`) 23681 -> 15671 -
+the rest are real names from the donor. Nesting the anonymous classes moves 2 (uniform) / 19
+(version-aware) pre-existing failures from the standalone file into the outer one: for-each and
+auto-unboxing that Vineflower emits for 1.4 bytecode, `log(..., null)` overload ambiguity. The 327
+left at 1.5 are overload ambiguity (41), `CloneNotSupportedException` (31) and `Integer`/`int`
+mismatches (35) that the compile-gated chain does not yet cover, plus ~100 missing dependencies.
 
 Coverage by package on MU1316: `de/audi` 17% of methods, `de/vw` 56%, `com/ibm`, `edu/emory`,
 `java/util` ~99%; `de/esolutions` and `org/dsi` 0% - the MH2p build of those has no `-g:vars`, so

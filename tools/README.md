@@ -18,6 +18,7 @@ flowchart LR
 | tool | kind | one-liner |
 |------|------|-----------|
 | [`combine.sh`](#combinesh) | merge | fold the firmware's OSGi bundles + app jars into the lsd base jar (`--appimg`) |
+| [`add_enclosing_method.py`](#add_enclosing_methodpy) | repair | `EnclosingMethod` for the bundle jars' anonymous classes (javac < 1.5 wrote none); run by `combine.sh` |
 | [`uninline/`](uninline/README.md) | ASM suite | recover inlined `static final` **names** (literal -> `getstatic`), value-verified |
 | [`vineflower.sh`](#vineflowersh) | driver | primary decompiler (VF 1.12.0, `jad` renamer, JDK8 runtime) |
 | [`cfr.sh`](#cfrsh) | driver | alternate decompiler (CFR 0.152) for cross-referencing |
@@ -114,7 +115,29 @@ Option set + manual command: [README -> Decompiling with CFR](../README.md#decom
 
 ## Decompile repair (post-processing)
 
+### `add_enclosing_method.py`
+
+javac 1.1-1.4 never wrote the `EnclosingMethod` attribute (JVMS 4.7.7), and the firmware's OSGi
+bundle jars are all major 45-48. Without it Vineflower cannot tie `Outer$N` to its declaration
+site and emits a standalone `Outer$N.java` whose constructor assigns a `this$0` field that does
+not exist and whose body touches the outer class's private members: on MU1316 that was 631 files,
+507 of them not compiling (45% of all isolated-compile failures). The pass adds the attribute with
+the same rule the converter uses for ROM classes (`jxe2jar.build_anon_enclosing`): the enclosing
+class and method are the single `new Outer$N` that constructs the class, searched within its
+top-level class family; a site in `<init>`/`<clinit>` yields the class only (javac writes
+`method_index` 0 for field and instance initializers); with no site the name prefix is used.
+Classes that already carry the attribute are untouched, so the pass is idempotent. `combine.sh`
+runs it on its output; standalone:
+
+```sh
+python3 tools/add_enclosing_method.py out/combined.jar -o out/combined-em.jar
+# out/combined-em.jar: added: class only=77, added: class+method=567, anonymous without EnclosingMethod=644, classes=35155
+```
+
 ### `innerclasses/repair.sh`
+
+Superseded by `add_enclosing_method.py` above (which writes the attribute javac would have
+written instead of filling in the `InnerClasses` outer slot). Kept for reference.
 
 Some firmware classfiles list an anonymous `$N` class in `InnerClasses` without
 its owner. Vineflower then emits a standalone `Outer$N.java` that refers to
@@ -185,9 +208,12 @@ python3 tools/fix_vf_artifacts.py out/final-vf --apply    # <unrepresentable> ->
 
 Decompiling pre-generics bytecode, Vineflower leaves out casts it believes redundant, and javac
 answers "incompatible types: Object cannot be converted to T" (or `Object[]` -> `T[]`). The tool
-compiles every file alone (`--cp` = the decompiled jar and its dependencies, `--bootclasspath` =
-the firmware JCL) and repairs only the reported lines, placing the cast where javac's caret says
-the offending expression is:
+compiles every file alone (`--cp` = the decompiled jar and its dependencies) and repairs only the
+reported lines, placing the cast where javac's caret says the offending expression is. Compile against
+the JDK runtime, as `isolated_compile_check.py` does at `-source 1.5`: with the firmware JCL as
+`--bootclasspath` there is no `java.lang.Iterable`, javac then reports `cannot access Iterable` on every
+for-each over a collection instead of the cast error, and nothing gets repaired (MU1316 v7: 13 files
+touched instead of ~300).
 
 ```java
 for (Object name_ : names) {                 // was: for (String name : names) {
@@ -202,7 +228,7 @@ isolated-compile report's failures. Found by the round-trip corpus oracle, where
 were the largest remaining failure classes after `fix_vf_artifacts.py`.
 
 ```sh
-python3 tools/fix_javac_casts.py out/final-vf --cp out/final.jar --bootclasspath libs/jcl/<FW>/jcl.jar --apply
+python3 tools/fix_javac_casts.py out/final-vf --cp out/final.jar --apply
 ```
 
 ### `decompile_oracle.py`
