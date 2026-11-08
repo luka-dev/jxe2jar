@@ -66,7 +66,9 @@ CLASS_DOLLAR_CACHE_NE = re.compile(
 
 def fix_dangling_outer_field(text):
     """Standalone Outer$N classes can lack a declared constructor-assigned this$0."""
-    if not re.search(r"this\.this\$0\s*=", text) or re.search(r"\bthis\$0\s*;", text):
+    # bail out only on a real declaration (`Type this$0;`), not on `this.this$0 = this$0;` - with
+    # a parameter named this$0 (LVT) the old guard mistook the assignment for the declaration
+    if not re.search(r"this\.this\$0\s*=", text) or re.search(r"[\w.$>\]]\s+this\$0\s*;", text):
         return text, 0
     match = re.search(
         r"(class\s+[\w$]+\$\d+[^\{]*\{)\s*(?:\r?\n)(\s*[\w$]+\$\d+\(([\w.$]+)\s+[\w$]+\)\s*\{)",

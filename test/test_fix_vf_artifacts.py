@@ -93,3 +93,10 @@ def test_toarray_cast_in_any_position():
     assert "return (ClassStats[]) this.classes.values().toArray(new ClassStats[0])" in fixed
     assert fixed.count("(String[]) done.toArray") == 1 and n == 3, fixed
     assert fix_text(fixed)[0] == fixed
+
+
+def test_dangling_outer_field_with_this0_parameter():
+    src = "class Outer$1 implements Runnable {\n    Outer$1(Outer this$0) {\n        this.this$0 = this$0;\n    }\n}\n"
+    fixed, n = fix_text(src)
+    assert n == 1 and "private final Outer this$0;" in fixed, fixed
+    assert fix_text(fixed)[0] == fixed

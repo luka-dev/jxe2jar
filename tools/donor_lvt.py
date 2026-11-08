@@ -147,7 +147,10 @@ def graft(data, donor, st):
                     changed = True
         methods_out.append((m, attrs))
     class_attrs = list(c["attrs"])
-    if "sf" in donor and not any(n == "SourceFile" for n, _ in class_attrs):
+    # SourceFile only for top-level classes: on a standalone `Outer$N` (anonymous class of a 1.4
+    # bundle, no EnclosingMethod) it makes Vineflower treat the class as nested, drop the synthetic
+    # outer field and keep `this.this$0 = outer;` - 27 MU1316 files stopped compiling that way
+    if "sf" in donor and "$" not in c["name"] and not any(n == "SourceFile" for n, _ in class_attrs):
         class_attrs.append(("SourceFile", struct.pack(">H", utf_idx(donor["sf"])))); changed = True; st["classes: SourceFile"] += 1
     if not changed: return data
 

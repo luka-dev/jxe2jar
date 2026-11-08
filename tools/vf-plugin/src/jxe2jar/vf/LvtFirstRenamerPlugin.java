@@ -60,12 +60,22 @@ final class LvtFirstNameProvider implements IVariableNameProvider {
     paramSlots = slots;
     StructLocalVariableTableAttribute lvt = method.getLocalVariableAttr();
     if (lvt != null) {
-      lvt.getMapNames().forEach((pair, name) -> { lvtSlots.add(pair.var); used.add(name); });
+      // javac's synthetic names (`this$0`, `val$x`) and `this` are not kept: with a constructor
+      // parameter literally called this$0 Vineflower no longer folds the outer-instance assignment
+      // and prints `this.this$0 = this$0` into a class whose synthetic field it removed
+      lvt.getMapNames().forEach((pair, name) -> {
+        if (keep(name)) { lvtSlots.add(pair.var); used.add(name); }
+      });
     }
   }
 
   private static boolean real(String name) {
     return name != null && !name.isEmpty() && !GENERATED.matcher(name).matches();
+  }
+
+  /** An LVT name worth keeping: not generated, not `this`, not javac-synthetic (`this$0`, `val$x`), not a keyword. */
+  private static boolean keep(String name) {
+    return real(name) && !"this".equals(name) && name.indexOf('$') < 0 && !RESERVED.contains(name);
   }
 
   @Override
@@ -83,7 +93,7 @@ final class LvtFirstNameProvider implements IVariableNameProvider {
 
   @Override
   public synchronized String renameParameter(int flags, VarType type, String name, int index) {
-    if (lvtSlots.contains(index) || real(name)) return name;
+    if (lvtSlots.contains(index) || keep(name)) return name;
     return parameters.computeIfAbsent(index, k -> fresh(clean(ExprProcessor.getCastTypeName(type))));
   }
 
