@@ -40,7 +40,7 @@ def test_donor_lvt():
         st = donor_lvt.apply(str(tmp / "rt.jar"), str(tmp / "db.json.gz"), str(tmp / "rt-lvt.jar"))
         want, got = _census(str(tmp / "donor.jar")), _census(str(tmp / "rt-lvt.jar"))
         assert got["methods"] == want["methods"]
-        assert got["lvt"] == want["lvt"] == st["methods: full LVT"], (want, got, dict(st))
+        assert got["lvt"] == st["methods: full LVT"] and 100 <= got["lvt"] < want["lvt"], (want, got, dict(st))  # methods whose only entry was `this` get no table
         assert got["lnt"] == want["lnt"], (want, got)
         assert st["methods: parameter names only"] == 0 and st["graft errors"] == 0, dict(st)
         subprocess.run([str(JDK8 / "javac"), "-d", str(tmp), str(ROOT / "test/VerifyAll.java")], check=True, capture_output=True)
@@ -48,6 +48,16 @@ def test_donor_lvt():
         assert verify.returncode == 0, verify.stdout + verify.stderr
         with zipfile.ZipFile(tmp / "rt-lvt.jar") as z:
             assert b"sinkMany" in z.read("cases/FloatTyping.class")  # sanity: a real name made it in
+        # javac's synthetic names never come along: no `this`, no `this$0` / `val$x` in any grafted table
+        for c in load(str(tmp / "rt-lvt.jar")).values():
+            for m in c["methods"].values():
+                d = dict(m["attrs"])
+                if "Code" not in d: continue
+                ca = dict(code(d["Code"], c["cp"])[4])
+                if "LocalVariableTable" in ca:
+                    data = ca["LocalVariableTable"]; cnt = int.from_bytes(data[:2], "big")
+                    names = [c["cp"].utf(int.from_bytes(data[2 + 10 * i + 4:2 + 10 * i + 6], "big")) for i in range(cnt)]
+                    assert all(n != "this" and "$" not in n for n in names), (c["name"], names)
 
 
 if __name__ == "__main__":

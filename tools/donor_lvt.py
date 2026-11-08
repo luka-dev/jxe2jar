@@ -32,6 +32,20 @@ def _fingerprint(bc, cp):
     return hashlib.sha1("\n".join(ins).encode("latin1", "replace")).hexdigest()[:16], pcs
 
 
+# Names that must not be grafted: `this` (slot 0 of the donor's instance method can be a real
+# parameter of ours when only the signature matches), javac's synthetic captures (`this$0`,
+# `val$x`), and keywords. With them Vineflower stops recognising its own synthetic patterns and
+# prints `this.this$0 = this$0` or `(int) this` (36 MU1316 files regressed on exactly this).
+_KEYWORDS = frozenset("abstract assert boolean break byte case catch char class const continue default do double else enum "
+                      "extends final finally float for goto if implements import instanceof int interface long native new package "
+                      "private protected public return short static strictfp super switch synchronized this throw throws transient "
+                      "try void volatile while true false null".split())
+
+
+def _graftable(name):
+    return name not in _KEYWORDS and "$" not in name and name.isidentifier()
+
+
 def _arg_slots(desc, static):
     i, n = 1, 0 if static else 1
     while desc[i] != ")":
@@ -110,7 +124,7 @@ def graft(data, donor, st):
                 exact = next((v for v in variants if v["fp"] == fp and v["n"] == len(pcs) - 1), None)
                 new = []
                 if exact is not None:
-                    lvt = [(pcs[si], pcs[ei] - pcs[si], utf_idx(nm), utf_idx(ds), slot) for si, ei, slot, nm, ds in exact.get("lvt", []) if slot < ml]
+                    lvt = [(pcs[si], pcs[ei] - pcs[si], utf_idx(nm), utf_idx(ds), slot) for si, ei, slot, nm, ds in exact.get("lvt", []) if slot < ml and _graftable(nm)]
                     if lvt: new.append(("LocalVariableTable", lvt)); st["methods: full LVT"] += 1
                     lnt = [(pcs[si], line) for si, line in exact.get("lnt", []) if si < len(pcs)]
                     if lnt: new.append(("LineNumberTable", lnt)); st["methods: line numbers"] += 1
@@ -118,7 +132,7 @@ def graft(data, donor, st):
                     src = next((v for v in variants if v.get("lvt")), None)
                     if src is not None:
                         nargs = _arg_slots(md, m["acc"] & 0x0008)
-                        lvt = [(0, len(bc), utf_idx(nm), utf_idx(ds), slot) for si, ei, slot, nm, ds in src["lvt"] if si == 0 and slot < nargs and slot < ml]
+                        lvt = [(0, len(bc), utf_idx(nm), utf_idx(ds), slot) for si, ei, slot, nm, ds in src["lvt"] if si == 0 and slot < nargs and slot < ml and _graftable(nm)]
                         if lvt: new.append(("LocalVariableTable", lvt)); st["methods: parameter names only"] += 1
                 if new:
                     head_len = 8 + len(bc) + 2 + 8 * len(ex)
