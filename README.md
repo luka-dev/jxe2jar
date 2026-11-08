@@ -764,6 +764,13 @@ and without the graft. Note that the un-inlined jar itself is decompile-only: in
 HotSpot rejects ("Illegal use of nonvirtual function call", 1303 classes on MU1316) - verify the
 converter's base jar, not the un-inlined one.
 
+End to end on MU1316 (converter, donor, renamer plugin, `fix_vf_artifacts`, `fix_javac_casts`,
+compile-gated chain) against the previous pipeline on the same tree of 21249 sources: isolated
+compile at a uniform `-source 1.5` 19799 -> 20122 (336 files fixed, 13 regressions, all in
+JCL/crypto classes where a donor slot type or a clone-catch repair disagrees with the body),
+version-aware 19719 -> 19983, `new X<>()` 126 -> 0, `varN` names 236 -> 146, generic JAD names
+(`obj`, `object3`) 23681 -> 15786 - the rest are real names from the donor.
+
 Coverage by package on MU1316: `de/audi` 17% of methods, `de/vw` 56%, `com/ibm`, `edu/emory`,
 `java/util` ~99%; `de/esolutions` and `org/dsi` 0% - the MH2p build of those has no `-g:vars`, so
 there is nothing to donate. HotSpot validates LVT ranges on load, so `-Xverify:all` doubles as the
