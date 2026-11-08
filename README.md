@@ -30,9 +30,9 @@ decompiler prints candidate names whose values are verified. End-to-end, one ima
 tools/uninline/build.sh                                                     # once (JDK 17+)
 python3 src/jxe2jar.py in.jxe out/base.jar                                 # convert
 tools/combine.sh out/base.jar out/combined.jar --appimg <APPIMG>           # + bundles & app jars
-tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
-python3 tools/donor_lvt.py apply out/final.jar libs/donor/mh2p-lvt.json.gz -o out/final-lvt.jar  # names from MH2p
-bash tools/vineflower.sh out/final-lvt.jar out/final-vf                    # decompile
+python3 tools/donor_lvt.py apply out/combined.jar libs/donor/mh2p-lvt.json.gz -o out/combined-lvt.jar  # names from MH2p
+tools/uninline/uninline.sh pipeline out/combined-lvt.jar out/final.jar out/doubtful.tsv 100
+bash tools/vineflower.sh out/final.jar out/final-vf                        # decompile
 python3 tools/nav_index.py out/final.jar out/nav                           # navigation index
 ```
 
@@ -71,10 +71,18 @@ instead of a wall of magic numbers.
    the un-inliner gives cross-corpus constant recovery and lets Vineflower resolve all app code
    intra-jar (no `--add-external` for it). Skip if you only want the bare lsd.
 
-3. **Recover inlined constant names** with the ASM un-inliner - **before decompiling**:
+3. **Graft local-variable names from the MH2p donors**, then **recover inlined constant names**
+   with the ASM un-inliner - both **before decompiling**:
    ```
-   tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
+   python3 tools/donor_lvt.py apply out/combined.jar libs/donor/mh2p-lvt.json.gz -o out/combined-lvt.jar
+   tools/uninline/uninline.sh pipeline out/combined-lvt.jar out/final.jar out/doubtful.tsv 100
    ```
+   The donor goes first because it matches methods by bytecode fingerprint and the un-inliner
+   rewrites `ldc` into `getstatic` (37807 exact matches on the combined jar vs 36076 after
+   un-inlining); ASM carries the grafted `LocalVariableTable`s through the rewrite untouched
+   (66032 methods with an LVT before and after; the verifier reports exactly the same classes
+   with and without the graft). See
+   [Donor names](#donor-names-localvariabletable-from-mh2p--toolsdonor_lvtpy-libsdonor).
    `javac` folds `static final` constants into raw literals, so a naive decompile shows
    `getChoiceModel(402127)` instead of a symbolic name. This pipeline rewrites selected literal
    loads into `getstatic Owner.FIELD` (value-preserving, decompile-only), so Vineflower
@@ -246,9 +254,9 @@ Every getstatic-to-int is re-judged lexically (tokenize camelCase / `UPPER_SNAKE
 tools/uninline/build.sh                                       # build uninline.jar (JDK 17+)
 python3 src/jxe2jar.py in.jxe out/base.jar                                 # convert (all classes)
 tools/combine.sh out/base.jar out/combined.jar --appimg <APPIMG>          # + bundles & app jars
-tools/uninline/uninline.sh pipeline out/combined.jar out/final.jar out/doubtful.tsv 100
-python3 tools/donor_lvt.py apply out/final.jar libs/donor/mh2p-lvt.json.gz -o out/final-lvt.jar  # names from MH2p
-bash tools/vineflower.sh out/final-lvt.jar out/final-vf                    # decompile
+python3 tools/donor_lvt.py apply out/combined.jar libs/donor/mh2p-lvt.json.gz -o out/combined-lvt.jar  # names from MH2p
+tools/uninline/uninline.sh pipeline out/combined-lvt.jar out/final.jar out/doubtful.tsv 100
+bash tools/vineflower.sh out/final.jar out/final-vf                        # decompile
 python3 tools/nav_index.py  out/final.jar out/nav                          # navigation index
 # QA (optional):  tools/uninline/uninline.sh audit out/final.jar
 ```
@@ -746,6 +754,15 @@ python3 tools/donor_lvt.py apply out/MU1316-base.jar libs/donor/mh2p-lvt.json.gz
 - a method that only matches by name + descriptor gets the **parameter names** (the LVT rows at
   pc 0 in argument slots depend on the signature alone) - 13104 more;
 - every touched class gets its `SourceFile` back (6233 classes).
+
+Apply it to the *combined* jar, before the un-inliner: the un-inliner turns `ldc` into
+`getstatic`, which changes the fingerprint of every method it touches, so applied afterwards the
+exact matches drop from 37807 to 36076. ASM carries the LVTs through the rewrite (same 66032
+methods with an LVT before and after), and `-Xverify:all` reports exactly the same classes with
+and without the graft. Note that the un-inlined jar itself is decompile-only: inlining
+`access$NNN` accessors leaves `invokespecial` calls into other classes' private methods, which
+HotSpot rejects ("Illegal use of nonvirtual function call", 1303 classes on MU1316) - verify the
+converter's base jar, not the un-inlined one.
 
 Coverage by package on MU1316: `de/audi` 17% of methods, `de/vw` 56%, `com/ibm`, `edu/emory`,
 `java/util` ~99%; `de/esolutions` and `org/dsi` 0% - the MH2p build of those has no `-g:vars`, so
