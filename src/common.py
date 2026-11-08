@@ -84,7 +84,7 @@ class ReaderStream:
         self.set(pos)
         length = self.read_u16()
         available = max(0, self.len - self.get())
-        if length > min(available, 10000):
+        if length > min(available, 0xFFFF):  # J9UTF8 length is u16; CJK converter tables reach 41 KB
             raise ValueError("invalid ROM string header")
         if length == 0:
             return ""

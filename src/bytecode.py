@@ -317,22 +317,21 @@ def _j9_instr_size(bytecode, i):
         0xA7, 0xA8,  # goto, jsr
         0xC6, 0xC7,  # ifnull, ifnonnull
         0xF9,  # ldc2dw (J9)
-        0xCB, 0xCC, 0xCD, 0xCE, 0xCF,  # J9 wide loads
-        0xD0, 0xD1, 0xD2, 0xD3, 0xD4,  # J9 wide stores
     ):
         return 3
 
     # --- 4-byte opcodes ---
-    if op == 0xC5:  # multianewarray
+    if op == 0xC5 or 0xCB <= op <= 0xD4:  # multianewarray; J9 wide loads/stores `op lo hi 00`
         return 4
 
     # --- 5-byte opcodes ---
     if op in (
         0xC8,  # goto_w
-        0xD5,  # iincw (J9)
         0xE7,  # invokeinterface2 (J9): 1 + 2 nop/pad + 2 cp index
     ):
         return 5
+    if op == 0xD5:  # J9 wide iinc `D5 lo hi clo chi 00`
+        return 6
 
     # --- variable-length: tableswitch ---
     if op == 0xAA:
@@ -376,513 +375,48 @@ def find_new_class_indices(bytecode):
     return indices
 
 
-def _parse_param_types(descriptor):
-    """Parse a method descriptor and return a list of single-char type indicators.
+OBJECT_FINALS = frozenset({
+    ("wait", "()V"), ("wait", "(J)V"), ("wait", "(JI)V"),
+    ("notify", "()V"), ("notifyAll", "()V"), ("getClass", "()Ljava/lang/Class;"),
+})
 
-    E.g. '(FILjava/lang/String;[BD)V' -> ['F', 'I', 'L', 'L', 'B', 'D']
-    Arrays and objects both return 'L'.
+
+def _was_invokevirtual(transform, owner, final_methods, private_methods):
+    """Did the romizer turn this J9 `invokespecial` out of an `invokevirtual`?
+
+    bcutil's rule (sub_1001299C, applied to every invokevirtual before romization):
+    rewrite iff the target is one of java/lang/Object's six final methods - whatever
+    class the reference names, javac uses the static receiver type - or the reference
+    names the class being romized and that class itself declares the method final or
+    private. Private calls were invokespecial already, so only the final ones go back.
+    Final classes, inherited finals, super calls and <init> are never touched.
     """
-    if not descriptor or descriptor[0] != "(":
-        return []
-    result = []
-    i = 1
-    while i < len(descriptor) and descriptor[i] != ")":
-        ch = descriptor[i]
-        if ch == "[":
-            # Array - skip all '[' then the component type
-            while i < len(descriptor) and descriptor[i] == "[":
-                i += 1
-            if i < len(descriptor) and descriptor[i] == "L":
-                i = descriptor.find(";", i)
-                if i == -1:
-                    return result
-            result.append("L")
-        elif ch == "L":
-            i = descriptor.find(";", i)
-            if i == -1:
-                return result
-            result.append("L")
-        elif ch in "BCDFIJSZ":
-            result.append(ch)
-        else:
-            break
-        i += 1
-    return result
+    key = (transform.get("ref_name"), transform.get("descriptor"))
+    if key in OBJECT_FINALS:
+        return True
+    return (
+        transform.get("ref_class") == owner
+        and key in final_methods
+        and key not in private_methods
+    )
 
 
-def _find_float_constants(bytecode, cp, signature):
-    """Identify J9 CP indices that should be FLOAT instead of INTEGER.
+# JVM opcodes after which control never falls through: ireturn..return, athrow, goto, goto_w,
+# tableswitch, lookupswitch, ret
+_TERMINAL_OPS = frozenset(range(0xAC, 0xB2)) | {0xBF, 0xA7, 0xC8, 0xAA, 0xAB, 0xA9}
 
-    Walks bytecode with a simplified stack simulation.  Stack entries are
-    either a J9 CP index (int, from ldc/ldc_w) or None.  When a
-    float-consuming opcode pops a tracked index, it gets added to the
-    returned set.
+
+def transform_bytecode(
+    bytecode, signature, cp, owner=None, method_name=None,
+    final_methods=frozenset(), private_methods=frozenset(),
+):
+    """Transforms bytecode and returns (new_bytecode, offset_map).
+
+    `final_methods` / `private_methods` are the (name, descriptor) sets of the owner's
+    own final / private methods, for the invokespecial -> invokevirtual restoration.
     """
-    float_indices = set()
-    stack = []
-
-    def _mark(entry):
-        if entry is not None:
-            float_indices.add(entry)
-
-    def _pop():
-        return stack.pop() if stack else None
-
-    def _push(v):
-        stack.append(v)
-
-    # Float-consuming opcodes that pop 1 float value
-    FLOAT_POP1 = {
-        0x38,  # fstore
-        0x43, 0x44, 0x45, 0x46,  # fstore_0..fstore_3
-        0x76,  # fneg
-        0x8B, 0x8C, 0x8D,  # f2i, f2l, f2d
-    }
-    # Float-consuming opcodes that pop 2 float values
-    FLOAT_POP2 = {
-        0x62,  # fadd
-        0x66,  # fsub
-        0x6A,  # fmul
-        0x6E,  # fdiv
-        0x72,  # frem
-        0x95, 0x96,  # fcmpl, fcmpg
-    }
-    # J9 wide fstore
-    FLOAT_WIDE_STORE = {0xD2}  # fstorew
-
-    # Branch opcodes (clear stack conservatively)
-    BRANCH_OPS = {
-        0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E,  # ifeq..ifle
-        0x9F, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4,  # if_icmpeq..if_icmple
-        0xA5, 0xA6,  # if_acmpeq, if_acmpne
-        0xA7, 0xA8,  # goto, jsr
-        0xC6, 0xC7,  # ifnull, ifnonnull
-        0xC8,  # goto_w
-        0xAA, 0xAB,  # tableswitch, lookupswitch
-    }
-
-    # Opcodes that push exactly 1 non-CP value (no pops)
-    PUSH1_OPS = {
-        0x01,  # aconst_null
-        0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,  # iconst_m1..iconst_5
-        0x09, 0x0A,  # lconst_0, lconst_1  (2 slots but we track None)
-        0x0B, 0x0C, 0x0D,  # fconst_0..fconst_2
-        0x0E, 0x0F,  # dconst_0, dconst_1
-        0x10,  # bipush
-        0x11,  # sipush
-        0x15, 0x16, 0x17, 0x18, 0x19,  # iload..aload
-        0x1A, 0x1B, 0x1C, 0x1D,  # iload_0..iload_3
-        0x1E, 0x1F, 0x20, 0x21,  # lload_0..lload_3
-        0x22, 0x23, 0x24, 0x25,  # fload_0..fload_3
-        0x26, 0x27, 0x28, 0x29,  # dload_0..dload_3
-        0x2A, 0x2B, 0x2C, 0x2D,  # aload_0..aload_3
-        0xBB,  # new
-        0xB2,  # getstatic (no pop, just push)
-        0xCB, 0xCC, 0xCD, 0xCE, 0xCF,  # J9 wide loads
-    }
-
-    # Opcodes that pop 1, push 1 (net zero, but must pop to keep stack aligned)
-    POP1_PUSH1_OPS = {
-        0xB4,  # getfield (pop objectref, push field value)
-        0xBE,  # arraylength (pop arrayref, push length)
-        0xC0,  # checkcast (pop ref, push ref - type unchanged)
-        0xC1,  # instanceof (pop ref, push int)
-    }
-
-    # Array load ops: pop 2 (index, arrayref), push 1 (value)
-    ARRAY_LOAD_OPS = {
-        0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,  # iaload..saload
-    }
-
-    # Return-1 opcodes (J9) - pop 1 value, mark as float if sig says F
-    RETURN1_OPS = {0xAD, 0xB0, 0xF5}  # JBreturn1, JBsyncReturn1, JBretFromNative1
-
-    i = 0
-    while i < len(bytecode):
-        op = bytecode[i]
-        size = _j9_instr_size(bytecode, i)
-
-        # --- ldc: push tracked CP index ---
-        if op == 0x12:  # ldc (1-byte index)
-            idx = bytecode[i + 1] if i + 1 < len(bytecode) else None
-            _push(idx)
-
-        elif op == 0x13:  # ldc_w (2-byte LE index)
-            if i + 3 <= len(bytecode):
-                idx = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
-                _push(idx)
-            else:
-                _push(None)
-
-        # --- float-consuming: pop 1 ---
-        elif op in FLOAT_POP1:
-            _mark(_pop())
-            if op == 0x76:  # fneg: push result back
-                _push(None)
-            elif op in (0x8B, 0x8C, 0x8D):  # f2i, f2l, f2d: push converted
-                _push(None)
-
-        # --- float-consuming: pop 2 ---
-        elif op in FLOAT_POP2:
-            _mark(_pop())
-            _mark(_pop())
-            _push(None)  # result (None since it's a computed value)
-
-        # --- fastore: pop value(float), index, arrayref ---
-        elif op == 0x51:  # fastore
-            _mark(_pop())  # value
-            _pop()  # index
-            _pop()  # arrayref
-
-        # --- J9 wide fstore ---
-        elif op in FLOAT_WIDE_STORE:
-            _mark(_pop())
-
-        # --- putfield / putstatic: check descriptor for F ---
-        elif op in (0xB3, 0xB5):  # putstatic, putfield
-            if i + 3 <= len(bytecode):
-                cp_idx = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
-                t = cp.transform.get(cp_idx)
-                desc = t.get("descriptor", "") if t else ""
-                if desc and desc[0] == "F":
-                    _mark(_pop())
-                else:
-                    _pop()
-                if op == 0xB5:  # putfield also pops objectref
-                    _pop()
-            else:
-                stack.clear()
-
-        # --- invoke*: check descriptor params for F ---
-        elif op in (0xB6, 0xB7, 0xB8, 0xB9, 0xE7):
-            if op == 0xE7:  # invokeinterface2: CP index at i+3
-                cp_offset = 3
-            else:
-                cp_offset = 1
-            if i + cp_offset + 2 <= len(bytecode):
-                cp_idx = struct.unpack("<H", bytecode[i + cp_offset : i + cp_offset + 2])[0]
-                t = cp.transform.get(cp_idx)
-                desc = t.get("descriptor", "") if t else ""
-                param_types = _parse_param_types(desc)
-                # Total argument slots (including wide types)
-                total_slots = 0
-                for pt in param_types:
-                    total_slots += 2 if pt in ("J", "D") else 1
-                # Has receiver? (instance methods)
-                has_receiver = op in (0xB6, 0xB7, 0xB9, 0xE7)
-                total_pop = total_slots + (1 if has_receiver else 0)
-                # Pop arguments from stack and check float params
-                # Arguments are pushed left-to-right, so last param is TOS.
-                # We pop in reverse param order.
-                args = []
-                for _ in range(total_slots):
-                    args.append(_pop())
-                if has_receiver:
-                    _pop()  # objectref
-                # Now args[0] = TOS = last param slot
-                # Walk param_types in reverse to match stack positions
-                slot = 0
-                for pt in reversed(param_types):
-                    if pt in ("J", "D"):
-                        slot += 2
-                    else:
-                        if pt == "F" and slot < len(args):
-                            _mark(args[slot])
-                        slot += 1
-                # Push return value if not void
-                if desc and ")" in desc:
-                    ret = desc[desc.rindex(")") + 1:]
-                    if ret and ret[0] != "V":
-                        _push(None)
-            else:
-                stack.clear()
-
-        # --- J9 return1: mark as float if method returns F ---
-        elif op in RETURN1_OPS:
-            if signature and signature.endswith(")F"):
-                _mark(_pop())
-            else:
-                _pop()
-
-        # --- JBretFromNativeF (0xF6): always float return ---
-        elif op == 0xF6:
-            _mark(_pop())
-
-        # --- dup: duplicate TOS ---
-        elif op == 0x59:  # dup
-            v = _pop()
-            _push(v)
-            _push(v)
-
-        # --- swap: swap top two ---
-        elif op == 0x5F:  # swap
-            a = _pop()
-            b = _pop()
-            _push(a)
-            _push(b)
-
-        # --- pop ---
-        elif op == 0x57:  # pop
-            _pop()
-        elif op == 0x58:  # pop2
-            _pop()
-            _pop()
-
-        # --- dup_x1: ..., b, a -> ..., a, b, a ---
-        elif op == 0x5A:
-            a = _pop()
-            b = _pop()
-            _push(a)
-            _push(b)
-            _push(a)
-
-        # --- dup_x2: ..., c, b, a -> ..., a, c, b, a ---
-        elif op == 0x5B:
-            a = _pop()
-            b = _pop()
-            c = _pop()
-            _push(a)
-            _push(c)
-            _push(b)
-            _push(a)
-
-        # --- dup2: ..., b, a -> ..., b, a, b, a ---
-        elif op == 0x5C:
-            a = _pop()
-            b = _pop()
-            _push(b)
-            _push(a)
-            _push(b)
-            _push(a)
-
-        # --- push 1 None for various opcodes ---
-        elif op in PUSH1_OPS:
-            _push(None)
-
-        # --- pop 1, push 1 (getfield, arraylength, checkcast, instanceof) ---
-        elif op in POP1_PUSH1_OPS:
-            _pop()
-            _push(None)
-
-        # --- array loads: pop 2 (index, arrayref), push 1 (value) ---
-        elif op in ARRAY_LOAD_OPS:
-            _pop()  # index
-            _pop()  # arrayref
-            _push(None)
-
-        # --- aload0getfield (J9): pushes 1 value ---
-        elif op == 0xD7:
-            _push(None)
-
-        # --- ldc2_lw / ldc2dw: push 1 wide value ---
-        elif op in (0x14, 0xF9):
-            _push(None)
-
-        # --- store ops (pop 1) ---
-        elif op in (
-            0x36, 0x37, 0x39, 0x3A,  # istore, lstore, dstore, astore
-            0x3B, 0x3C, 0x3D, 0x3E,  # istore_0..istore_3
-            0x3F, 0x40, 0x41, 0x42,  # lstore_0..lstore_3
-            0x47, 0x48, 0x49, 0x4A,  # dstore_0..dstore_3
-            0x4B, 0x4C, 0x4D, 0x4E,  # astore_0..astore_3
-            0xD0, 0xD1, 0xD3, 0xD4,  # J9 wide stores (not fstorew)
-        ):
-            _pop()
-
-        # --- array stores (pop 3: value, index, arrayref) ---
-        elif op in (0x4F, 0x50, 0x52, 0x53, 0x54, 0x55, 0x56):
-            # iastore, lastore, dastore, aastore, bastore, castore, sastore
-            _pop()
-            _pop()
-            _pop()
-
-        # --- binary int/long ops (pop 2, push 1) ---
-        elif op in (
-            0x60, 0x61, 0x63,  # iadd, ladd, dadd
-            0x64, 0x65, 0x67,  # isub, lsub, dsub
-            0x68, 0x69, 0x6B,  # imul, lmul, dmul
-            0x6C, 0x6D, 0x6F,  # idiv, ldiv, ddiv
-            0x70, 0x71, 0x73,  # irem, lrem, drem
-            0x78, 0x79,  # ishl, lshl
-            0x7A, 0x7B,  # ishr, lshr
-            0x7C, 0x7D,  # iushr, lushr
-            0x7E, 0x7F,  # iand, land
-            0x80, 0x81,  # ior, lor
-            0x82, 0x83,  # ixor, lxor
-            0x94,  # lcmp
-            0x97, 0x98,  # dcmpl, dcmpg
-        ):
-            _pop()
-            _pop()
-            _push(None)
-
-        # --- unary ops (pop 1, push 1) ---
-        elif op in (
-            0x74, 0x75, 0x77,  # ineg, lneg, dneg
-            0x85, 0x86, 0x87,  # i2l, i2f, i2d
-            0x88, 0x89, 0x8A,  # l2i, l2f, l2d
-            0x8E, 0x8F, 0x90,  # d2i, d2l, d2f
-            0x91, 0x92, 0x93,  # i2b, i2c, i2s
-        ):
-            _pop()
-            _push(None)
-
-        # --- branches: clear stack ---
-        elif op in BRANCH_OPS:
-            stack.clear()
-
-        # --- return / athrow: clear stack ---
-        elif op in (
-            0xAC, 0xAE, 0xAF, 0xB1,  # JBreturn0, JBreturn2, JBsyncReturn0..2
-            0xBF,  # athrow
-            0xE4, 0xE5,  # returnFromConstructor, genericReturn
-            0xF3, 0xF4, 0xF7, 0xF8,  # J9 retFromNative variants
-        ):
-            stack.clear()
-
-        # --- monitorenter/monitorexit: pop 1 ---
-        elif op in (0xC2, 0xC3):
-            _pop()
-
-        # --- iinc / iincw / nop-like: no stack effect ---
-        elif op in (0x84, 0xD5, 0x00, 0xCA, 0xFA, 0xFE, 0xFF):
-            pass
-
-        # --- anything else: clear stack (conservative) ---
-        else:
-            stack.clear()
-
-        i += size
-
-    return float_indices
-
-
-def _find_ternary_float_constants(bytecode, cp, known_float_indices=None):
-    """Reclassify ldc INTEGER constants that are really floats but live inside a
-    ternary branch.
-
-    J9/JVM store `int` and `float` ldc constants in the same INTEGER pool slot, and
-    the linear flow in `_find_float_constants` clears its stack at every branch, so a
-    constant sitting in one arm of a `cond ? A : B` expression is never seen flowing
-    into the float consumer. The result is one arm typed `int` and the other `float`,
-    which decompilers cannot unify ("No common supertype for ternary expression").
-
-    We match the ternary shape directly:  `ifXX L1 ; <arm A> ; goto L2 ; L1: <arm B> ; L2:`
-    If one arm's terminal push is an int-ldc and the other arm's is unambiguously a
-    float, Java type unification proves the int-ldc must be a float - so we return its
-    J9 CP index for reclassification. (int-vs-float is the only case we touch, so a
-    genuine int constant is never mis-typed.)
-    """
-    known_float_indices = known_float_indices or set()
-
-    FLOAT_TERMINAL = {
-        0x0B, 0x0C, 0x0D,              # fconst_0..2
-        0x17, 0x22, 0x23, 0x24, 0x25,  # fload, fload_0..3
-        0x30,                          # faload
-        0x76,                          # fneg
-        0x86, 0x89, 0x90,              # i2f, l2f, d2f
-        0x62, 0x66, 0x6A, 0x6E, 0x72,  # fadd, fsub, fmul, fdiv, frem
-        0xCD,                          # J9 wide fload
-    }
-
-    def _ldc_index(op, at):
-        if op == 0x12 and at + 2 <= len(bytecode):          # ldc
-            return bytecode[at + 1]
-        if op == 0x13 and at + 3 <= len(bytecode):          # ldc_w
-            return struct.unpack("<H", bytecode[at + 1 : at + 3])[0]
-        return None
-
-    def _int_ldc_index(op, at):
-        k = _ldc_index(op, at)
-        if k is None:
-            return None
-        t = cp.transform.get(k)
-        return k if (t and t.get("type") == CONST.INTEGER) else None
-
-    def _classify_arm(start, end):
-        """Return ('intconst', cp_idx) | ('float', None) | ('other', None) from the
-        arm's terminal value-producing instruction."""
-        kind, idx = "other", None
-        j = start
-        while j < end:
-            op = bytecode[j]
-            sz = _j9_instr_size(bytecode, j)
-            k = _ldc_index(op, j)
-            if k in known_float_indices:
-                kind, idx = "float", None
-            elif k is not None and _int_ldc_index(op, j) is not None:
-                kind, idx = "intconst", k
-            elif op in FLOAT_TERMINAL:
-                kind, idx = "float", None
-            elif op in (0xB6, 0xB7, 0xB8, 0xB9, 0xE7):      # invoke* -> float if returns F
-                co = 3 if op == 0xE7 else 1
-                if j + co + 2 <= len(bytecode):
-                    ci = struct.unpack("<H", bytecode[j + co : j + co + 2])[0]
-                    t = cp.transform.get(ci)
-                    d = t.get("descriptor", "") if t else ""
-                    r = d[d.rindex(")") + 1 :] if ")" in d else ""
-                    kind, idx = ("float", None) if (r and r[0] == "F") else ("other", None)
-                else:
-                    kind, idx = "other", None
-            elif op == 0xA7:                                # goto: not a push, keep prior
-                pass
-            else:
-                kind, idx = "other", None
-            j += sz if sz > 0 else 1
-        return kind, idx
-
-    result = set()
-    n = len(bytecode)
-    i = 0
-    while i < n:
-        op = bytecode[i]
-        sz = _j9_instr_size(bytecode, i)
-        if ((0x99 <= op <= 0xA6) or op in (0xC6, 0xC7)) and i + 3 <= n:
-            rel = struct.unpack("<h", bytecode[i + 1 : i + 3])[0]
-            T = i + rel                                     # L1 (ifXX target = arm B start)
-            a_start = i + 3
-            if a_start < T <= n:
-                g = l2 = None
-                if (
-                    T - 3 >= a_start
-                    and T <= n
-                    and bytecode[T - 3] == 0xA7
-                ):                                          # goto (3B) ends arm A
-                    g = T - 3
-                    if g + 3 <= n:
-                        l2 = g + struct.unpack("<h", bytecode[g + 1 : g + 3])[0]
-                elif (
-                    T - 5 >= a_start
-                    and T <= n
-                    and bytecode[T - 5] == 0xC8
-                ):                                          # goto_w (5B)
-                    g = T - 5
-                    if g + 5 <= n:
-                        l2 = g + struct.unpack("<i", bytecode[g + 1 : g + 5])[0]
-                if g is not None and l2 is not None and T < l2 <= n:
-                    ka, ia = _classify_arm(a_start, g)
-                    kb, ib = _classify_arm(T, l2)
-                    if ka == "intconst" and kb == "float":
-                        result.add(ia)
-                    elif kb == "intconst" and ka == "float":
-                        result.add(ib)
-        i += sz if sz > 0 else 1
-    return result
-
-
-def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
-    """Transforms bytecode and returns (new_bytecode, offset_map)."""
     i = 0
     new_cp_transform = {}
-
-    # Pre-pass: identify float constants via stack simulation
-    float_cp_indices = _find_float_constants(bytecode, cp, signature)
-    # Pre-pass: float constants hidden inside ternary branches (int/float merge)
-    float_cp_indices |= _find_ternary_float_constants(bytecode, cp, float_cp_indices)
-    for j9_idx in float_cp_indices:
-        t = cp.transform.get(j9_idx)
-        if t and t.get("type") == CONST.INTEGER:
-            new_cp_transform[t["new_index"]] = b"\x04"  # FLOAT
 
     new_bytecode = bytearray()
     offset_map = {}
@@ -894,9 +428,11 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
     def _pack_s32(value):
         return struct.pack(">i", value)
 
+    last_end = last_op = None  # end of the last non-nop instruction in the output, its JVM opcode
     while i < len(bytecode):
         offset_map[i] = len(new_bytecode)
         opcode = bytecode[i]
+        out_start = len(new_bytecode)
         if opcode in (
             JBOpcode.JBgetstatic,
             JBOpcode.JBputstatic,
@@ -920,18 +456,8 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             transform = cp.transform.get(index)
             if not transform:
                 break
-            # J9 devirtualizes `invokevirtual` of a final method into `invokespecial`
-            # (final => statically bindable). Standard bytecode forbids invokespecial
-            # to a superclass method on a non-`this` receiver, so the HotSpot verifier
-            # rejects it ("Incompatible object argument for invokespecial"). Object's
-            # getClass/wait/notify/notifyAll are final - virtual and non-virtual dispatch
-            # are identical and no super-call is possible - so restoring invokevirtual is
-            # always safe. (The common trigger is the `x.getClass()` NPE/equals idiom.)
-            if (
-                opcode == JBOpcode.JBinvokespecial
-                and transform.get("ref_class") == "java/lang/Object"
-                and transform.get("ref_name")
-                in ("getClass", "wait", "notify", "notifyAll")
+            if opcode == JBOpcode.JBinvokespecial and _was_invokevirtual(
+                transform, owner, final_methods, private_methods
             ):
                 new_bytecode[op_pos] = JBOpcode.JBinvokevirtual
             new_index = transform["new_index"]
@@ -952,98 +478,33 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             tmp = struct.pack(">H", new_index + 1)
             new_bytecode += tmp
             i += 3
-        elif opcode in (JBOpcode.JBldc2lw,):
-            if i + 3 > len(bytecode):
-                break
-            index = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
-            if index == 0xFFFF:
-                break
-            cp_len = None
-            if getattr(cp, "romclass", None) is not None:
-                cp_len = len(cp.romclass.constant_pool)
-            if cp_len is not None and index == cp_len and index > 0:
-                index -= 1
-            new_bytecode.append(JBOpcode.JBldc2lw)
-            if cp.check_transform(index, b"\x06"):
-                transform = cp.get_transform(index)
-                new_index = transform["new_index"]
-                tmp = struct.pack(">H", new_index + 1)
-                new_cp_transform[new_index] = b"\x05"
-                new_bytecode += tmp
-            else:
-                if cp.check_transform(index, b"\x03"):
-                    transform = cp.get_transform(index)
-                    new_index = transform["new_index"]
-                    new_index = cp.add(CONST.LONG, (0, cp.get_int(new_index))) - 1
-                else:
-                    raw_long = cp.get_raw_long(index)
-                    if raw_long is not None:
-                        new_index = cp.add(CONST.LONG, raw_long) - 1
-                    else:
-                        where = ""
-                        if owner and method_name:
-                            where = f" in {owner}.{method_name}{signature}"
-                        print(f"WARNING: ldc2_w fallback{where} (cp={index})")
-                        # TODO: very dirty hack, because we incorrectly
-                        # parse constant pool used in 1 case
-                        new_index = 0
-                tmp = struct.pack(">H", new_index + 1)
-                new_bytecode += tmp
-            i += 3
-        elif opcode in (JBOpcode.JBldc2dw,):
+        elif opcode in (JBOpcode.JBldc2lw, JBOpcode.JBldc2dw):
+            # The ROM kind stream already typed the slot LONG or DOUBLE; the distinct J9
+            # opcodes are a cross-check (a slot missing from the stream defaulted to LONG).
             new_bytecode.append(JBOpcode.JBldc2lw)
             if i + 3 > len(bytecode):
                 break
             index = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
-            if index == 0xFFFF:
-                break
-            cp_len = None
-            if getattr(cp, "romclass", None) is not None:
-                cp_len = len(cp.romclass.constant_pool)
-            if cp_len is not None and index == cp_len and index > 0:
-                index -= 1
-            if cp.check_transform(index, b"\x06"):
-                # Already DOUBLE (8 bytes + phantom) - just keep it.
-                transform = cp.get_transform(index)
-                new_index = transform["new_index"]
-                tmp = struct.pack(">H", new_index + 1)
-                new_bytecode += tmp
-            elif cp.check_transform(index, b"\x03"):
-                # INTEGER (4 bytes, no phantom) - create proper DOUBLE entry.
-                transform = cp.get_transform(index)
-                old_index = transform["new_index"]
-                raw = cp.get_int(old_index)
-                new_index = cp.add(CONST.DOUBLE, (raw, 0)) - 1
-                tmp = struct.pack(">H", new_index + 1)
-                new_bytecode += tmp
+            want = CONST.DOUBLE if opcode == JBOpcode.JBldc2dw else CONST.LONG
+            if cp.check_transform(index, want):
+                new_index = cp.get_transform(index)["new_index"]
+            elif cp.check_transform(index, CONST.LONG) or cp.check_transform(index, CONST.DOUBLE):
+                new_index = cp.get_transform(index)["new_index"]
+                new_cp_transform[new_index] = want
             else:
-                raw_long = cp.get_raw_long(index)
-                if raw_long is not None:
-                    new_index = cp.add(CONST.DOUBLE, raw_long) - 1
-                else:
-                    transform = cp.transform.get(index)
-                    if transform:
-                        new_index = transform["new_index"]
-                        new_cp_transform[new_index] = b"\x06"
-                    else:
-                        where = ""
-                        if owner and method_name:
-                            where = f" in {owner}.{method_name}{signature}"
-                        print(f"WARNING: ldc2_dw fallback{where} (cp={index})")
-                        new_index = 0
-                tmp = struct.pack(">H", new_index + 1)
-                new_bytecode += tmp
+                where = f" in {owner}.{method_name}{signature}" if owner and method_name else ""
+                print(f"WARNING: ldc2 operand cp[{index}] is not an 8-byte constant{where}")
+                new_index = -1
+            new_bytecode += struct.pack(">H", new_index + 1)
             i += 3
         elif opcode in (JBOpcode.JBiincw,):
-            # Convert J9 wide iinc to standard wide form.
+            # J9 `D5 lo hi clo chi 00` (6 bytes) -> `wide iinc hi lo chi clo` (6 bytes)
             new_bytecode.append(0xC4)  # wide
             new_bytecode.append(JBOpcode.JBiinc)
             o1 = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
-            o2 = struct.unpack("<H", bytecode[i + 3 : i + 5])[0]
-            t1 = struct.pack(">H", o1)
-            t2 = struct.pack(">H", o2)
-            new_bytecode += t1 + t2
-            i += 5
+            o2 = struct.unpack("<h", bytecode[i + 3 : i + 5])[0]
+            new_bytecode += struct.pack(">H", o1) + struct.pack(">h", o2)
+            i += 6
         elif opcode in (
             JBOpcode.JBiloadw,
             JBOpcode.JBlloadw,
@@ -1056,7 +517,7 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             JBOpcode.JBdstorew,
             JBOpcode.JBastorew,
         ):
-            # Convert J9 wide load/store to standard wide form.
+            # J9 `op lo hi 00` (4 bytes) -> `wide op hi lo` (4 bytes)
             opcode_map = {
                 JBOpcode.JBiloadw: JBOpcode.JBiload,
                 JBOpcode.JBlloadw: JBOpcode.JBlload,
@@ -1072,9 +533,8 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             new_bytecode.append(0xC4)  # wide
             new_bytecode.append(opcode_map[opcode])
             value = struct.unpack("<H", bytecode[i + 1 : i + 3])[0]
-            tmp = struct.pack(">H", value)
-            new_bytecode += tmp
-            i += 3
+            new_bytecode += struct.pack(">H", value)
+            i += 4
         elif opcode in (JBOpcode.JBsipush,):
             # sipush: push a 16-bit signed immediate onto the stack.
             new_bytecode.append(opcode)
@@ -1320,6 +780,8 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
         else:
             new_bytecode.append(opcode)
             i += 1
+        if opcode != 0x00 and len(new_bytecode) > out_start:
+            last_end, last_op = len(new_bytecode), new_bytecode[out_start]
 
     offset_map[len(bytecode)] = len(new_bytecode)
 
@@ -1331,6 +793,16 @@ def transform_bytecode(bytecode, signature, cp, owner=None, method_name=None):
             new_bytecode[pos : pos + 2] = _pack_s16(new_rel)
         else:
             new_bytecode[pos : pos + 4] = _pack_s32(new_rel)
+
+    # The romizer pads every method's bytecode to a u32 boundary with nops. They can only
+    # follow a terminal instruction, so nothing branches to them: drop them and clamp the
+    # exception-table offsets that pointed at the old end.
+    if (last_end is not None and last_op in _TERMINAL_OPS and last_end < len(new_bytecode)
+            and not any(new_bytecode[last_end:])):
+        del new_bytecode[last_end:]
+        for key, value in offset_map.items():
+            if value > last_end:
+                offset_map[key] = last_end
 
     for index, value in new_cp_transform.items():
         cp.apply_transform(index, value)

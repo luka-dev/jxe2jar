@@ -25,6 +25,8 @@ class J9CONST(int, Enum):
     CLASS = 2
     LONG = 3
     REF = 4
+    FLOAT = 5
+    DOUBLE = 6
 
 
 def _encode_utf8(value: str) -> bytes:
@@ -83,40 +85,6 @@ def _sanitized_ref(name, descriptor):
 
 
 class ConstPool:
-    def _try_decode_ref_from_long(self, constant):
-        romclass = self.romclass
-        if not romclass or not getattr(romclass, "rom_stream", None):
-            return None
-        value = getattr(constant, "raw_value", None)
-        value_type = getattr(constant, "raw_type", None)
-        pos = getattr(constant, "rom_pos", None)
-        base = getattr(romclass, "rom_base", None)
-        if None in (value, value_type, pos, base):
-            return None
-        if value < 0:
-            return None
-        if value_type != 4:
-            return None
-        stream = romclass.rom_stream
-        stream_len = int(stream.len)
-        class_ptr = base + 8 * value
-        if class_ptr < 0 or class_ptr + 4 > stream_len:
-            return None
-        with StreamCursor(stream, class_ptr):
-            _class = stream.read_string_ref()
-        if not _class:
-            _class = romclass.class_name
-        ptr = value_type + pos + 4
-        if ptr < 0 or ptr + 4 > stream_len:
-            return None
-        with StreamCursor(stream, ptr):
-            name = stream.read_string_ref()
-            descriptor = stream.read_string_ref()
-        if not name or not descriptor:
-            return None
-        descriptor = descriptor.rstrip("\x00")
-        return (_class, name, descriptor)
-
     def __init__(self, romclass):
         self.pool = []
         self.transform = {}
@@ -125,52 +93,18 @@ class ConstPool:
         # self.pool.append([-1, None])
 
         for i, constant in enumerate(romclass.constant_pool):
-            if constant.type == J9CONST.INT:
+            if constant.type in (J9CONST.INT, J9CONST.FLOAT):
+                tag = CONST.FLOAT if constant.type == J9CONST.FLOAT else CONST.INTEGER
                 index = len(self.pool)
-                self.pool.append([CONST.INTEGER, constant.value[::-1]])
-                self.transform[i] = {"new_index": index, "type": CONST.INTEGER}
-            elif constant.type == J9CONST.LONG:
-                decoded = self._try_decode_ref_from_long(constant)
-                if decoded:
-                    _class, name, descriptor = decoded
-                    name, descriptor = _sanitized_ref(name, descriptor)
-                    index = len(self.pool)
-                    const_type = (
-                        CONST.METHODREF
-                        if descriptor.find("(") >= 0
-                        else CONST.FIELDREF
-                    )
-                    self.pool.append([const_type, "", ""])
-                    value_class = _encode_utf8(_class)
-                    value_c_name = _encode_utf8(name)
-                    value_c_desc = _encode_utf8(descriptor)
-                    stack.append(
-                        (
-                            index,
-                            CONST.CLASS,
-                            struct.pack(">H", len(value_class)) + value_class,
-                        )
-                    )
-                    stack.append(
-                        (
-                            index,
-                            CONST.NAMEANDTYPE,
-                            struct.pack(">H", len(value_c_name)) + value_c_name,
-                            struct.pack(">H", len(value_c_desc)) + value_c_desc,
-                        )
-                    )
-                    self.transform[i] = {
-                        "new_index": index,
-                        "type": const_type,
-                        "descriptor": descriptor,
-                        "ref_class": _class,
-                        "ref_name": name,
-                    }
-                else:
-                    index = len(self.pool)
-                    self.pool.append([CONST.DOUBLE, constant.value[::-1]])
-                    self.pool.append([-1, None])
-                    self.transform[i] = {"new_index": index, "type": CONST.DOUBLE}
+                self.pool.append([tag, constant.value[::-1]])
+                self.transform[i] = {"new_index": index, "type": tag}
+            elif constant.type in (J9CONST.LONG, J9CONST.DOUBLE):
+                # ROM-tail 8-byte constant {low, high} -> big-endian, plus the phantom slot
+                tag = CONST.DOUBLE if constant.type == J9CONST.DOUBLE else CONST.LONG
+                index = len(self.pool)
+                self.pool.append([tag, constant.value[::-1]])
+                self.pool.append([-1, None])
+                self.transform[i] = {"new_index": index, "type": tag}
             elif constant.type == J9CONST.STRING:
                 index = len(self.pool)
                 self.pool.append([CONST.STRING, ""])
@@ -339,17 +273,6 @@ class ConstPool:
 
     def get_transform(self, index):
         return self.transform[index]
-
-    def get_raw_long(self, index):
-        """Return raw (hi, lo) tuple from original ROM constant, if present."""
-        if not self.romclass or index >= len(self.romclass.constant_pool):
-            return None
-        const = self.romclass.constant_pool[index]
-        raw_hi = getattr(const, "raw_type", None)
-        raw_lo = getattr(const, "raw_value", None)
-        if raw_hi is None or raw_lo is None:
-            return None
-        return (raw_hi & 0xFFFFFFFF, raw_lo & 0xFFFFFFFF)
 
     def write(self, stream):
         def _is_missing(value):

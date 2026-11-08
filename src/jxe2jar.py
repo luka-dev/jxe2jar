@@ -2,13 +2,16 @@
 
 This script parses a JXE image and reconstructs .class files that are
 compatible with common JVM tooling. It performs a small set of fixups:
- - Infers a minimal classfile version from flags (min 46, effectively capped at
-   49 so the romizer-stripped StackMapTable is never required by the verifier).
- - Rewrites J9-specific bytecode patterns to standard JVM bytecode.
+ - Classfile version 46, or 49 for classes with a Java 5 feature (the ROM keeps
+   no version; never >= 50, which would require the stripped StackMapTable).
+   --major N forces one version on every class.
+ - Rewrites J9-specific bytecode patterns to standard JVM bytecode, and restores
+   the invokevirtual the J9 romizer devirtualised into invokespecial.
  - Rebuilds constant pool entries (including ConstantValue where possible).
 
 Usage:
   python3 src/jxe2jar.py input.jxe output.jar
+  python3 src/jxe2jar.py input.jxe output.jar --major 46
   python3 src/jxe2jar.py input.jxe output.jar --strip-synthetic
   python3 src/jxe2jar.py input.jxe output.jar --dont-infer-enclosing
 
@@ -24,7 +27,7 @@ import io
 import os
 import zipfile
 
-from bytecode import find_new_class_indices, transform_bytecode
+from bytecode import find_new_class_indices, transform_bytecode, JBOpcode, _j9_instr_size
 from constpool import CONST, ConstPool
 from jxe import JXE, ConstType, ReaderStream, WriterStream
 
@@ -99,46 +102,47 @@ def _method_arg_slots(descriptor: str) -> int:
 
 
 def _infer_classfile_major(romclass) -> int:
-    """Infer the minimal classfile major version required by class features."""
-    # CDC/J9 targets old classfiles; start from Java 1.2 baseline (46).
-    required = 46
+    """46 (javac 1.2) unless the class carries a Java 5 feature that cannot exist in
+    an older classfile: enum/annotation flags, bridge/varargs methods, or a generic
+    Signature. The ROM keeps no classfile version, so this is the whole evidence.
 
-    # Class-level flags that require Java 5+.
-    if romclass.access_flags & (0x2000 | 0x4000):  # annotation/enum
-        required = max(required, 49)
-    if romclass.access_flags & 0x1000:  # synthetic
-        required = max(required, 49)
+    ACC_SYNTHETIC does NOT bump the version: javac <= 1.4 marked synthetic members
+    with the `Synthetic` attribute and the J9 romizer folds that into the 0x1000
+    flag, so the flag says nothing about the source level (RemoteHMIService and
+    every other 1.2-era class with a `this$0`/`class$` member must stay 46).
 
-    # Module flag would require Java 9+, but we clamp to 52 below.
-    if romclass.access_flags & 0x8000:
-        required = max(required, 53)
+    Never >= 50: the romizer strips StackMapTable, which the type-checking verifier
+    requires; <= 49 keeps every class on the inference verifier.
+    """
+    java5 = (
+        romclass.access_flags & (0x2000 | 0x4000)  # annotation / enum
+        or getattr(romclass, "class_generic_signature", None)
+        or any(f.access_flag & 0x4000 or getattr(f, "generic_signature", None) for f in romclass.fields)
+        or any(m.modifier & (0x0040 | 0x0080) or getattr(m, "generic_signature", None) for m in romclass.methods)
+        or _uses_ldc_class(romclass)
+        # `package-info` is only a legal class name from version 49 on (HotSpot:
+        # ClassFormatError "Illegal class name" below); javac 1.5+ emits it for package annotations
+        or romclass.class_name.rsplit("/", 1)[-1] == "package-info"
+    )
+    return 49 if java5 else 46
 
-    for field in romclass.fields:
-        if field.access_flag & 0x4000:  # enum
-            required = max(required, 49)
-        if field.access_flag & 0x1000:  # synthetic
-            required = max(required, 49)
 
+def _uses_ldc_class(romclass) -> bool:
+    """javac >= 1.5 loads `Foo.class` with `ldc CONSTANT_Class`, which the verifier rejects
+    in a classfile below 49 ("Illegal type in constant pool"); javac <= 1.4 went through
+    `class$()`. Found by the junit round trip: 2 of 143 otherwise-1.4-looking classes."""
+    pool = romclass.constant_pool
     for method in romclass.methods:
-        # strictfp exists since Java 1.2
-        if method.modifier & 0x0800:
-            required = max(required, 46)
-        # bridge/varargs require Java 5+
-        if method.modifier & (0x0040 | 0x0080):
-            required = max(required, 49)
-        if method.modifier & 0x1000:
-            required = max(required, 49)
-        # NOTE: no invokedynamic (0xBA) bump. A raw `0xBA in bytecode` byte-scan
-        # false-positives on 0xBA operands (it flagged 1559 firmware classes that
-        # have zero real invokedynamic). And the converter emits no BootstrapMethods,
-        # so a genuine invokedynamic couldn't be produced anyway. Capping at 49 keeps
-        # every class on the old inference verifier (no StackMapTable required), which
-        # the romizer strips - otherwise v50+ classes fail -Xverify:all.
-
-    # J9/CDC firmware is javac-7 max with no invokedynamic; 49 covers every used
-    # feature (annotations, enums, bridge/varargs, synthetic) and stays verifiable
-    # without stack maps.
-    return max(required, 46)
+        bc = method.bytecode
+        i = 0
+        while i < len(bc):
+            op = bc[i]
+            if op in (JBOpcode.JBldc, JBOpcode.JBldcw):
+                idx = bc[i + 1] if op == JBOpcode.JBldc else int.from_bytes(bc[i + 1:i + 3], "little")
+                if idx < len(pool) and pool[idx].type == ConstType.CLASS:
+                    return True
+            i += _j9_instr_size(bc, i)
+    return False
 
 
 def build_inner_meta(classes):
@@ -317,24 +321,21 @@ def _build_inner_classes_attr(romclass, const_pool, inner_meta, children):
 
 def dump_romclass(
     stream, romclass, strip_synthetic: bool = False, inner_meta=None, children=None,
-    infer_enclosing: bool = False, anon_enclosing=None
+    infer_enclosing: bool = False, anon_enclosing=None, major=None,
 ) -> tuple[ConstPool, list]:  # pylint: disable=R0914, R0915
-    """Dumps romclass."""
+    """Dumps romclass. `major` forces the classfile version."""
     stream.write_raw_bytes(b"\xca\xfe\xba\xbe")
-    # Infer the minimal classfile version required by flags/opcodes.
-    target_minor = 0
-    target_major = _infer_classfile_major(romclass)
-    if (
-        getattr(romclass, "class_generic_signature", None)
-        or any(getattr(m, "generic_signature", None) for m in romclass.methods)
-        or any(getattr(f, "generic_signature", None) for f in romclass.fields)
-    ):
-        target_major = max(target_major, 49)  # Signature attribute needs >= 49
-    stream.write_u16(target_minor)
-    stream.write_u16(target_major)
+    stream.write_u16(0)
+    stream.write_u16(major or _infer_classfile_major(romclass))
+    private_methods = {
+        (m.name, m.signature) for m in romclass.methods if m.modifier & 0x0002
+    }
+    final_methods = {
+        (m.name, m.signature) for m in romclass.methods if m.modifier & 0x0010
+    }
     const_pool = ConstPool(romclass)
     class_name_id = const_pool.add(CONST.CLASS, romclass.class_name)
-    superclass_name_id = const_pool.add(CONST.CLASS, romclass.superclass_name)
+    superclass_name_id = const_pool.add(CONST.CLASS, romclass.superclass_name) if romclass.superclass_name else 0  # java/lang/Object: JVMS wants 0
     interface_id_list = []
     method_info_list = []
 
@@ -343,13 +344,6 @@ def dump_romclass(
 
     field_info_list = []
     const_value_attr_name_index = const_pool.add(CONST.UTF8, "ConstantValue")
-
-    field_names = {field.name for field in romclass.fields}
-    has_empty_string = any(
-        getattr(c, "value", None) == ""
-        for c in romclass.constant_pool
-        if getattr(c, "type", None) == 1
-    )
 
     for field in romclass.fields:
         access_flags = field.access_flag & FIELD_FLAG_MASK
@@ -379,17 +373,13 @@ def dump_romclass(
                         CONST.DOUBLE, (field.const_value2, field.const_value)
                     )
             elif sig == "Ljava/lang/String;":
+                # the constant word is the index of the STRING slot in the ROM pool (the
+                # old "blank it if it equals another field's name" guard dropped real
+                # values such as KEY_SERVICE_MANAGER = "serviceManager")
                 if field.const_value < len(romclass.constant_pool):
                     rom_const = romclass.constant_pool[field.const_value]
-                    if hasattr(rom_const, "value"):
-                        value = rom_const.value
-                        if (
-                            value in field_names
-                            and value != field.name
-                            and not has_empty_string
-                        ):
-                            value = ""
-                        const_index = const_pool.add(CONST.STRING, value)
+                    if rom_const.type == ConstType.STRING:
+                        const_index = const_pool.add(CONST.STRING, rom_const.value)
 
         if const_index is not None:
             attributes.append(
@@ -441,6 +431,8 @@ def dump_romclass(
                 const_pool,
                 owner=romclass.class_name,
                 method_name=method.name,
+                final_methods=final_methods,
+                private_methods=private_methods,
             )
         else:
             bytecode = b""
@@ -680,7 +672,7 @@ def dump_romclass(
 
 def create_class(
     romclass, jarfile, strip_synthetic: bool = False, inner_meta=None, children=None,
-    infer_enclosing: bool = False, anon_enclosing=None
+    infer_enclosing: bool = False, anon_enclosing=None, major=None,
 ) -> None:
     """Creates class"""
     class_name = romclass.class_name
@@ -690,7 +682,7 @@ def create_class(
     res = dump_romclass(
         stream, romclass, strip_synthetic=strip_synthetic, inner_meta=inner_meta,
         children=children, infer_enclosing=infer_enclosing,
-        anon_enclosing=anon_enclosing
+        anon_enclosing=anon_enclosing, major=major,
     )
     stream.write()
     jarfile.writestr(class_file, f_stream.getvalue())
@@ -704,6 +696,7 @@ def _create_jar(
     strip_synthetic=False,
     infer_enclosing=True,
     jxe_path=None,
+    major=None,
 ):
     with zipfile.ZipFile(jar_name, "w") as jar_zipfile:
         total = len(jxe.image.classes)
@@ -723,7 +716,6 @@ def _create_jar(
         inner_meta, children = build_inner_meta(jxe.image.classes)
         # Enclosing class+method of anonymous classes, from their `new` site.
         anon_enclosing = build_anon_enclosing(jxe.image.classes)
-
         for idx, romclass in enumerate(jxe.image.classes, 1):
             print(f"[{idx}/{total}] {romclass.class_name}")
             try:
@@ -735,6 +727,7 @@ def _create_jar(
                     children=children,
                     infer_enclosing=infer_enclosing,
                     anon_enclosing=anon_enclosing,
+                    major=major,
                 )
                 written += 1
             except Exception as exc:  # pylint: disable=W0718
@@ -758,6 +751,11 @@ Examples:
     parser.add_argument('jar_file', help='Output JAR file')
     parser.add_argument('--strip-synthetic', action='store_true',
                         help='Clear ACC_SYNTHETIC flags on classes/methods/fields')
+    parser.add_argument('--major', type=int, default=None,
+                        help='Force this classfile major version on every class '
+                             '(e.g. 46 for classes you patch and load on the J9 2.3 '
+                             'device). Default: 46, or 49 when the class carries a '
+                             'Java 5 feature (enum/annotation/bridge/varargs/Signature)')
     parser.add_argument('--dont-infer-enclosing', dest='infer_enclosing',
                         action='store_false', default=True,
                         help='Disable the default EnclosingMethod synthesis. By default, '
@@ -778,6 +776,7 @@ Examples:
             strip_synthetic=args.strip_synthetic,
             infer_enclosing=args.infer_enclosing,
             jxe_path=args.jxe_file,
+            major=args.major,
         )
 
 

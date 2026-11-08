@@ -18,6 +18,32 @@ class ConstType(int, Enum):
     CLASS = 2
     LONG = 3
     REF = 4
+    FLOAT = 5
+    DOUBLE = 6
+
+
+# Word 19 of the class header: the "CP kind-run" stream the romizer writes for every scalar
+# and ref slot (bcutil sub_10015E20). runs of {kindByte, count:u8, index[count]} ending in
+# 0xFF; odd kindByte => kind = byte+1 with u8 indices, even => u16 LE indices.
+KIND_INT, KIND_FLOAT, KIND_LONG, KIND_DOUBLE = 14, 16, 18, 6
+KIND_STATIC_METHOD, KIND_VIRTUAL_METHOD, KIND_SPECIAL_METHOD, KIND_INTERFACE_METHOD = 2, 8, 10, 12
+KIND_INSTANCE_FIELD, KIND_STATIC_FIELD = 20, 22
+
+
+def read_kind_runs(stream) -> dict:
+    """Decode the kind-run stream at the current position: {rom cp index: kind}."""
+    kinds = {}
+    while True:
+        kind_byte = stream.read_u8()
+        if kind_byte == 0xFF:
+            return kinds
+        count = stream.read_u8()
+        if kind_byte & 1:
+            kind, indices = kind_byte + 1, [stream.read_u8() for _ in range(count)]
+        else:
+            kind, indices = kind_byte, [stream.read_u16() for _ in range(count)]
+        for index in indices:
+            kinds[index] = kind
 
 
 def _consume_field_descriptor(desc: str, idx: int) -> int:
@@ -185,9 +211,7 @@ class J9ROMMethod:
         name = stream.read_string_ref()
         signature = stream.read_string_ref()
         modifier = stream.read_u32()
-        use_bytecodesize_high = modifier & 0x00008000
         has_exception_info = modifier & 0x00020000
-        add_four1 = modifier & 0x00010000  # pylint: disable=unused-variable
         max_stack = stream.read_u16()
         generic_signature = None  # resolved from the 0x02000000 SRP below
         if modifier & 0x100:
@@ -209,34 +233,27 @@ class J9ROMMethod:
             # stream.read_u32()
             if modifier & 0x2000000:
                 stream.read_u32()
-            if modifier & 0x20000:
-                extra_pos = stream.get()
-                table_a = stream.read_u16()
-                table_b = stream.read_u16()
-                extra_len = table_a * 16 + table_b * 4
-                stream_len = int(stream.len)
-                if (
-                    extra_len <= 0
-                    or extra_len > 0x100000
-                    or extra_pos + extra_len > stream_len
-                ):
-                    stream.set(extra_pos)
-                else:
-                    stream.read_bytes(extra_len)
             caught_exceptions = []
             thrown_exceptions = []
+            if modifier & 0x20000:
+                # same exception-info block as bytecode methods: a native has no catch
+                # entries but keeps its declared `throws` (was skipped as opaque bytes)
+                caught_exception_count = stream.read_u16()
+                thrown_exception_count = stream.read_u16()
+                caught_exceptions = [
+                    J9ROMCatchException.read(stream) for _ in range(caught_exception_count)
+                ]
+                thrown_exceptions = [
+                    J9ROMThrowException.read(stream) for _ in range(thrown_exception_count)
+                ]
             bytecode = stream.read_bytes(0)
             
 
         else:
-            bytecode_size_low = stream.read_u16()
-            bytecode_size_high = stream.read_u8()
+            bytecode_size = stream.read_u16() * 4  # in u32 units
+            stream.read_u8()  # byte 16: never written by the romizer (stale buffer), ignore
             arg_count = stream.read_u8()
             temp_count = stream.read_u16()
-            bytecode_size = bytecode_size_low
-            if use_bytecodesize_high:
-                bytecode_size += bytecode_size_high << 16
-            bytecode_size *= 4
             bytecode = stream.read_bytes(bytecode_size)
             if modifier & 0x02000000:
                 # J9AccMethodHasGenericSignature: the u32 after bytecode is a self-
@@ -259,9 +276,10 @@ class J9ROMMethod:
             else:
                 caught_exceptions = []
                 thrown_exceptions = []
-
-            # if add_four2:
-            # stream.read_u32()
+            if modifier & 0x00400000:
+                # reserved trailer word of the precompile/AOT configuration (jar2jxe's own
+                # ROM-method walker skips it; never set by the interpreter-only builder)
+                stream.read_u32()
 
         return J9ROMMethod(
             name,
@@ -308,101 +326,89 @@ class J9ROMConstant:
         self.raw_value = raw_value
         self.raw_type = raw_type
         self.rom_pos = rom_pos
-        match cons_type:
-            case ConstType.INT | ConstType.STRING | ConstType.LONG:
-                self.value = value
-            case ConstType.CLASS:
-                self.value = value
-            case ConstType.REF:
-                self._class = _class
-                self.name = name
-                self.descriptor = descriptor
+        if cons_type == ConstType.REF:
+            self._class = _class
+            self.name = name
+            self.descriptor = descriptor
+        else:
+            self.value = value
 
     @staticmethod
-    def read(stream: BitArray, base, class_name, class_count=None):
-        """Returns J9 constant from stream."""
+    def read(stream: BitArray, base, class_name, index, ram_count, shapes, kinds):
+        """Returns one J9 ROM constant-pool slot (8 bytes: two u32 words).
+
+        Slot typing is deterministic, from two facts the ROM records (verified on
+        3047 classes / 150k slots: zero contradictions with the referencing opcodes):
+          * index >= ramConstantPoolCount: the ROM-only tail, which holds every
+            long/double (8 raw bytes, stored {low, high}); ldc2_lw / ldc2_dw at the
+            use site decide long vs double. Nothing else ever lives there.
+          * else the cpShapeDescription nibble: 1 = string, 2 = class (first word is
+            an SRP to the J9UTF8), 3 = static field ref, 0 = either a single-slot
+            scalar (int/float, second word 0) or a method / instance field ref
+            {U32 classRefCPIndex; SRP nameAndSignature} (second word is the SRP,
+            never 0). The shape table only covers the RAM part of the pool.
+          * the header's kind-run stream (`kinds`, see read_kind_runs) says int vs float
+            and long vs double for every scalar slot; a slot missing from it (older or
+            foreign builders) falls back to int / long and is retyped by its ldc2 use.
+        """
         pos = stream.get()
         value = stream.read_u32()
         value_type = stream.read_u32()
-        raw_value = value
-        raw_type = value_type
+        common = dict(raw_value=value, raw_type=value_type, rom_pos=pos)
 
-        match value_type:
-            case ConstType.STRING | ConstType.CLASS:
-                value = struct.unpack("<i", struct.pack("<I", value))[0]
-                ptr = pos + value
-                with StreamCursor(stream, ptr):
-                    value = stream.read_string()
-            case ConstType.INT:
-                value = struct.pack("<I", value)
-            case ConstType.LONG:
-                value = struct.pack("<II", value, value_type)
-                value_type = ConstType.LONG
-            case _:
-                stream_len = int(stream.len)
-                if class_count is not None and value >= class_count:
-                    value = struct.pack("<II", value, value_type)
-                    value_type = ConstType.LONG
-                    return J9ROMConstant(
-                        value_type,
-                        value=value,
-                        raw_value=raw_value,
-                        raw_type=raw_type,
-                        rom_pos=pos,
-                    )
+        kind = kinds.get(index)
+        if index >= ram_count:
+            return J9ROMConstant(
+                ConstType.DOUBLE if kind == KIND_DOUBLE else ConstType.LONG,
+                value=struct.pack("<II", value, value_type), **common,
+            )
+        shape = shapes[index]
+        if shape in (1, 2):
+            srp = struct.unpack("<i", struct.pack("<I", value))[0]
+            with StreamCursor(stream, pos + srp):
+                text = stream.read_string()
+            return J9ROMConstant(
+                ConstType.STRING if shape == 1 else ConstType.CLASS, value=text, **common
+            )
+        if shape == 0 and value_type == 0:
+            return J9ROMConstant(
+                ConstType.FLOAT if kind == KIND_FLOAT else ConstType.INT,
+                value=struct.pack("<I", value), **common,
+            )
 
-                class_ptr = base + 8 * value
-                if class_ptr < 0 or class_ptr + 4 > stream_len:
-                    value = struct.pack("<II", value, value_type)
-                    value_type = ConstType.LONG
-                    return J9ROMConstant(
-                        value_type,
-                        value=value,
-                        raw_value=raw_value,
-                        raw_type=raw_type,
-                        rom_pos=pos,
-                    )
-                try:
-                    with StreamCursor(stream, class_ptr):
-                        _class = stream.read_string_ref()
-                    if not _class:
-                        _class = class_name
-                    ptr = value_type + pos + 4
-                    if ptr < 0 or ptr + 4 > stream_len:
-                        raise ValueError("invalid ref pointer")
-                    with StreamCursor(stream, ptr):
-                        name = stream.read_string_ref()
-                        descriptor = stream.read_string_ref()
-                    if not name:
-                        raise ValueError("invalid ref name")
-                    if descriptor:
-                        descriptor = descriptor.rstrip("\x00")
-                    if not _is_descriptor(descriptor):
-                        cleaned = descriptor.split("\x00", 1)[0] if descriptor else ""
-                        if _is_descriptor(cleaned):
-                            descriptor = cleaned
-                        elif not descriptor:
-                            raise ValueError("invalid ref descriptor")
-                    return J9ROMConstant(
-                        ConstType.REF,
-                        _class=_class,
-                        name=name,
-                        descriptor=descriptor,
-                        raw_value=raw_value,
-                        raw_type=raw_type,
-                        rom_pos=pos,
-                    )
-                except Exception:
-                    value = struct.pack("<II", value, value_type)
-                    value_type = 3
-
-        return J9ROMConstant(
-            value_type,
-            value=value,
-            raw_value=raw_value,
-            raw_type=raw_type,
-            rom_pos=pos,
-        )
+        # field / method ref: first word indexes the owner's CLASS slot, second word
+        # is an SRP (relative to its own position) to {SRP name; SRP descriptor}.
+        try:
+            if not (value < ram_count and shapes[value] == 2):
+                raise ValueError("ref class index is not a class slot")
+            with StreamCursor(stream, base + 8 * value):
+                _class = stream.read_string_ref() or class_name
+            nas = pos + 4 + struct.unpack("<i", struct.pack("<I", value_type))[0]
+            if not 0 <= nas <= int(stream.len) - 8:
+                raise ValueError("invalid ref pointer")
+            with StreamCursor(stream, nas):
+                name = stream.read_string_ref()
+                descriptor = stream.read_string_ref()
+            if not name:
+                raise ValueError("invalid ref name")
+            descriptor = descriptor.rstrip("\x00")
+            if not _is_descriptor(descriptor):
+                cleaned = descriptor.split("\x00", 1)[0]
+                if _is_descriptor(cleaned):
+                    descriptor = cleaned
+                elif not descriptor:
+                    raise ValueError("invalid ref descriptor")
+            return J9ROMConstant(
+                ConstType.REF, _class=_class, name=name, descriptor=descriptor, **common
+            )
+        except Exception as exc:  # pylint: disable=W0718
+            # Never expected (the typing above is exact); keep the slot so later
+            # indices stay aligned, and say so - a used placeholder fails verification.
+            print(
+                f"WARNING: {class_name} cp[{index}] shape={shape} words="
+                f"({value:#x},{value_type:#x}) unreadable ref ({exc}); INT 0 placeholder"
+            )
+            return J9ROMConstant(ConstType.INT, value=b"\x00\x00\x00\x00", **common)
 
 
 class J9ROMClass:
@@ -421,7 +427,6 @@ class J9ROMClass:
         constant_pool,
         rom_base=None,
         rom_stream=None,
-        class_count=None,
         ram_constant_pool_count=None,
         rom_constant_pool_count=None,
         outer_class_name=None,
@@ -444,7 +449,6 @@ class J9ROMClass:
         self.constant_pool = constant_pool
         self.rom_base = rom_base
         self.rom_stream = rom_stream
-        self.class_count = class_count
         self.ram_constant_pool_count = ram_constant_pool_count
         self.rom_constant_pool_count = rom_constant_pool_count
         # Real J9 ROM inner-class metadata (JVMS InnerClasses/EnclosingMethod source).
@@ -460,7 +464,7 @@ class J9ROMClass:
         self.enclosing_method_sig = enclosing_method_sig
 
     @staticmethod
-    def read_at(stream: BitArray, class_name: str, class_pointer: int, class_count=None):
+    def read_at(stream: BitArray, class_name: str, class_pointer: int):
         """Returns J9 Class from already resolved pointer."""
         print(f"  -> reading class {class_name!r}")
         with StreamCursor(stream, class_pointer):
@@ -493,19 +497,35 @@ class J9ROMClass:
             double_scalar_static_count = stream.read_u32()  # noqa: F841
             ram_constant_pool_count = stream.read_u32()
             rom_constant_pool_count = stream.read_u32()
-            crc = stream.read_u32()  # noqa: F841
+            stream.read_u32()  # word 15: reserved, always 0
             instance_size = stream.read_u32()  # noqa: F841
-            instance_shape = stream.read_u32()  # noqa: F841
-            cp_shape_description_pointer = stream.read_relative()  # noqa: F841
+            stream.read_u32()  # word 17: constant 14 in every image seen
+            # cpShapeDescription: 4 bits per RAM constant-pool slot, LSB-first within
+            # each little-endian u32 (see J9ROMConstant.read for the nibble values).
+            cp_shape_description_pointer = stream.read_relative()
+            with StreamCursor(stream, cp_shape_description_pointer):
+                shape_words = [
+                    stream.read_u32() for _ in range((ram_constant_pool_count + 7) // 8)
+                ]
+            cp_shapes = [
+                (shape_words[k // 8] >> (4 * (k % 8))) & 0xF
+                for k in range(ram_constant_pool_count)
+            ]
 
-            # --- inner-class metadata: layout verified against ground-truth jars.
-            # J9ROMClass here is (per u32 word after cpShapeDescription):
-            #   [+0] reserved SRP (unused here)   [+1] outerClassName SRP
+            # --- words 19..25 (per u32 word after cpShapeDescription):
+            #   [+0] kind-run stream SRP          [+1] outerClassName SRP
             #   [+2] memberAccessFlags            [+3] innerClassCount
             #   [+4] innerClasses SRP             [+5] optionalFlags   [+6] optionalInfo SRP
-            # (An SRP whose stored i32 is 0 is NULL. The JVM version is not in this
-            # region; the converter recomputes it, so major/minor are placeholders.)
-            _reserved_srp = stream.read_u32()  # noqa: F841
+            # (An SRP whose stored i32 is 0 is NULL. The ROM keeps no classfile version;
+            # the converter infers it, so major/minor are placeholders.)
+            kinds = {}
+            kr_base = stream.get()
+            kr_raw = stream.read_i32()
+            if kr_raw != 0:
+                with StreamCursor(stream, kr_base + kr_raw):
+                    kinds = read_kind_runs(stream)
+            else:
+                print(f"WARNING: {class_name} has no CP kind stream; int/float typing is a guess")
 
             occ_base = stream.get()
             occ_raw = stream.read_i32()
@@ -585,20 +605,18 @@ class J9ROMClass:
             )
 
             for i in range(constant_pool_count):
+                slot = stream.get()
                 try:
                     constant_pool.append(
-                        J9ROMConstant.read(stream, base, class_name, class_count)
+                        J9ROMConstant.read(
+                            stream, base, class_name, i, ram_constant_pool_count, cp_shapes, kinds
+                        )
                     )
-                except EOFError:
-                    # A CP slot whose pointer-chase hit EOF - J9 padding that sits
-                    # between ram_constant_pool_count and rom_constant_pool_count.
-                    # The main stream is already advanced past this slot (pointer
-                    # reads use StreamCursor, which restores position), so we MUST
-                    # still append a placeholder: dropping the entry shifts every
-                    # later CP index by one, which silently rewires all constant-pool
-                    # references after it (wrong classes, swapped field name/descriptor)
-                    # and yields a class the loader rejects. A zero INTEGER is inert
-                    # for these unreferenced padding slots.
+                except Exception as exc:  # pylint: disable=W0718
+                    # Keep the slot: dropping it shifts every later CP index by one and
+                    # silently rewires all references after it. A zero INTEGER is inert.
+                    print(f"WARNING: {class_name} cp[{i}] unreadable ({exc}); INT 0 placeholder")
+                    stream.set(slot + 8)
                     constant_pool.append(
                         J9ROMConstant(ConstType.INT, value=b"\x00\x00\x00\x00")
                     )
@@ -630,7 +648,6 @@ class J9ROMClass:
             constant_pool,
             rom_base=base,
             rom_stream=stream,
-            class_count=class_count,
             ram_constant_pool_count=ram_constant_pool_count,
             rom_constant_pool_count=rom_constant_pool_count,
             outer_class_name=outer_class_name,
@@ -680,7 +697,7 @@ class J9ROMImage:
         classes = []
         for idx, (name, ptr) in enumerate(toc, 1):
             print(f"[TOC] {idx}/{class_count} {name!r}")
-            classes.append(J9ROMClass.read_at(stream, name, ptr, class_count))
+            classes.append(J9ROMClass.read_at(stream, name, ptr))
         stream.set(pos)
 
         return J9ROMImage(

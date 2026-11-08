@@ -44,7 +44,7 @@ python3 tools/nav_index.py out/final.jar out/nav                           # nav
 | `tools/` | Merge (`combine.sh`), decompile drivers (`vineflower.sh`, `cfr.sh`) and post-processors (`decompile_fallback.py`, `fix_vf_artifacts.py`, `int2hex.py`, `nav_index.py`, `xref.py`) |
 | `libs/` | 5 curated SDK jars (osgi.framework, osgi.util.tracker, commons.logging, xerces, commons-codec), fed to Vineflower as `--add-external` (type resolution) |
 | `jvms/` | Bundled runtimes: Zulu **JDK 8** (mac/linux/win - the target 1.2/1.3 stdlib) + WM5 emulator for `jar2jxe` |
-| `test/custom_edgecases/` | Exhaustive edge-case suite (Java 1.2) validating the converter via **JAR -> JXE -> JAR** round-trip |
+| `test/custom_edgecases/` | Edge-case suite (Java 1.2, 54 classes) validating the converter via **JAR -> JXE -> JAR** round-trip; new cases are romized unattended with [`tools/wm5/`](tools/wm5/README.md) |
 | `vms/` | XP VM + WM5 emulator hosting the legacy `jar2jxe.exe` (round-trip direction) |
 | `out/` | Conversion outputs, decompiled trees, logs, nav indexes |
 
@@ -450,10 +450,10 @@ verifier or a decompiler rejects. This table is the map; each row links to the d
 |---|---|---|
 | [Classfile version <= 49](#classfile-version--srcjxe2jarpy) | `jxe2jar.py` | ROM strips `StackMapTable`; v >= 50 verifier *requires* it |
 | [`invokespecial` -> `invokevirtual`](#devirtualized-invokespecial---invokevirtual--srcbytecodepy) | `bytecode.py` | J9 devirtualizes final calls; verifier rejects the receiver |
-| [Constant-pool tail integrity](#constant-pool-tail-integrity--srcjxepy-srcconstpoolpy) | `jxe.py`, `constpool.py` | a dropped/garbage slot shifts every later CP index |
+| [Constant-pool slot typing](#constant-pool-slot-typing--srcjxepy-srcconstpoolpy) | `jxe.py`, `constpool.py` | a ref read as a `Double` (or vice versa) is an `Illegal type in constant pool` |
 | [Modified UTF-8](#modified-utf-8-for-string-constants--srcconstpoolpy) | `constpool.py` | NUL / astral chars are rejected by the loader |
 | [Empty ROM strings](#empty-rom-strings--srccommonpy) | `common.py` | a zero-length `J9UTF8` read as padding returns the *next* pool entry |
-| [Float constant recovery](#float-constant-recovery--srcbytecodepy) | `bytecode.py` | ROM merges int/float -> ternary "no common supertype" |
+| [Float constant recovery](#float-constant-recovery--srcjxepy) | `jxe.py` | int and float share a slot shape; the kind stream says which |
 | [InnerClasses reconstruction](#innerclasses-reconstruction-from-real-rom-metadata--srcjxe2jarpy-srcjxepy) | `jxe2jar.py`, `jxe.py` | correct nesting + inline decompilation |
 | [EnclosingMethod](#enclosingmethod-attribute--srcjxe2jarpy-srcjxepy) | `jxe2jar.py`, `jxe.py` | anonymous/local classes inline into their method (`new` site recovers what the ROM erased) |
 | [Exceptions / `throws`](#exceptions-attribute--throws-clauses--srcjxe2jarpy) | `jxe2jar.py` | recover declared checked exceptions |
@@ -476,18 +476,17 @@ high opcodes** (`0xCA-0xFF`). Those are what `bytecode.py` rewrites:
 | `JBgenericReturn` `JBreturnToMicroJIT` | `E5 F3` | inferred | return kind derived from descriptor |
 | `JBaload0getfield` | `D7` | `aload_0` + `getfield` | J9 fuses the `this.field` prefix; expanded to two ops |
 | `JBinvokeinterface2` (+`nop`) | `E7` | `invokeinterface` | J9's 2-byte form -> JVMS 4-byte (count from descriptor); the trailing `nop` absorbs the realignment |
-| J9 wide load/store | `CB-D4` | `wide` (`C4`) + op | re-encoded to the standard `wide` prefix form |
-| J9 wide `iinc` | - | `wide` `iinc` | same |
+| J9 wide load/store | `CB-D4` | `wide` (`C4`) + op | `op lo hi 00` (4 bytes) -> `wide op hi lo` (4 bytes): same length, offsets round-trip exactly |
+| J9 wide `iinc` | `D5` | `wide` `iinc` | `D5 lo hi clo chi 00` (6 bytes) -> `wide iinc hi lo chi clo` (6 bytes) |
 | `JBldc2lw` / `ldc2dw` | `14` / `F9` | `ldc2_w` | **distinct** opcodes -> long vs double is deterministic (no ambiguity) |
 | `JBbreakpoint` `JBasyncCheck` `JBimpdep1` `JBimpdep2` | `CA FA FE FF` | `nop` | JIT/debug hooks, no runtime effect |
 | `invokespecial` on `Object` finals | `B7` | `invokevirtual` | see [devirtualization fixup](#devirtualized-invokespecial---invokevirtual--srcbytecodepy) |
 
-Two consequences ripple through the rest of translation: every rewrite that changes byte length
-(`aload0getfield`, `invokeinterface2`, wide re-encoding, `ldc`->`ldc_w` when the CP index > 255)
-shifts later offsets, so **branch/switch targets and the exception table are recomputed against an
-output-offset map**; and because J9 has no int/float opcode distinction, a **stack-simulation
-pre-pass** ([Float constant recovery](#float-constant-recovery--srcbytecodepy)) decides which
-`ldc` constants are float before any of this runs.
+One consequence ripples through the rest of translation: every rewrite that changes byte
+length (`aload0getfield`, `invokeinterface2`, `ldc`->`ldc_w` when the CP index > 255) shifts
+later offsets, so **branch/switch targets and the exception table are recomputed against an
+output-offset map**. (Wide forms do not shift: J9's 4/6-byte encodings map onto `wide` forms
+of the same length.)
 
 ### What `jxe.py` reads out of each ROM class
 
@@ -497,61 +496,86 @@ because a wrong offset shifts everything after it:
 
 | ROM source | -> classfile | gate / location |
 |---|---|---|
-| `romConstantPoolCount` + CP slots | constant pool | placeholder on `EOFError` to keep indices aligned |
-| `J9ROMMethod` {modifiers, bytecode, exceptions} | methods + `Code` | modifier bit `0x02000000` = generic `Signature` (u32 after bytecode) |
+| `ramConstantPoolCount`, `cpShapeDescription`, kind-run stream (word 19) + CP slots | constant pool | slot type = shape nibble (RAM part) or long/double (ROM tail); int/float and long/double from the kind stream, see [slot typing](#constant-pool-slot-typing--srcjxepy-srcconstpoolpy) |
+| `J9ROMMethod` {modifiers, bytecode, exceptions} | methods + `Code` | modifier bit `0x02000000` = generic `Signature` (u32 after bytecode); `0x00400000` = one reserved trailer word (AOT builds); byte 16 is never written by the romizer (not a size-high byte) |
 | `J9ROMField` {access, const slots} | fields + `ConstantValue` | access bit `0x40000000` = generic `Signature` |
 | `outerClassName`, `memberAccessFlags`, `innerClasses` | `InnerClasses` | header layout: `outerClassName` one word later than the old map assumed |
 | optional-info SRPs (popcount-indexed) | `Signature` / `EnclosingMethod` | class flag `0x02` = class Signature, `0x40` = EnclosingObject, `0x80` = simpleName |
 | `throwExceptions` | `Exceptions` | - |
 
 ### Classfile version  (`src/jxe2jar.py`)
-The version is inferred from class/field/method flags (minimum 46), bumped to 49 when
-synthetic/enum/annotation/bridge/varargs flags are present so `javac`/`javap` accept the output.
+The J9 ROM keeps **no classfile version** (the header words rubiks' tool labels `major/minor`
+are the optional-info flags), so the converter has to pick one. It writes **46** (javac 1.2)
+unless the class carries a feature that cannot exist below Java 5 - enum/annotation flags,
+bridge/varargs methods, a generic `Signature`, or an `ldc` of a `CONSTANT_Class` (javac >= 1.5
+compiles `Foo.class` that way; the verifier rejects it below 49 with *"Illegal type in constant
+pool"*, found by the junit round trip), or the class is a `package-info` (an illegal class name
+below 49, found by the guava round trip) - in which case **49**. On MU1316 that is 30158 classes
+at 46 and 385 at 49.
+
+`ACC_SYNTHETIC` does *not* bump the version: javac <= 1.4 marked synthetic members (`this$0`,
+`access$000`, `class$`) with the `Synthetic` *attribute*, which the romizer folds into the
+`0x1000` flag - the firmware's own non-romized bundle jars show ~2000 such 45-48 classes. An
+earlier heuristic stamped every synthetic-bearing class 49, which is wrong for a 1.2 class
+(`RemoteHMIService`) and made the output unusable as a base for classes that go back onto the
+device. `--major N` forces one version on every class when you need that.
 
 **Never >= 50.** The J9 romizer strips `StackMapTable`, which the type-checking verifier (class
 version >= 50) *requires* - so any >= 50 stamp yields a class that fails `-Xverify:all` with
 *"Expecting a stack map frame"*. Version <= 49 keeps every class on the old inference verifier,
-which needs no stack maps. (An earlier heuristic bumped to 51 on a raw `0xBA in bytecode`
-byte-scan for invokedynamic; that false-positives on any class whose bytecode merely contains a
-`0xBA` operand byte, and the converter emits no `BootstrapMethods` anyway. Removed - CDC/J9 ROM
-images are pre-invokedynamic, so capping at 49 keeps every class verifiable.)
+which needs no stack maps.
 
 ### Devirtualized `invokespecial` -> `invokevirtual`  (`src/bytecode.py`)
 - **Problem:** J9's romizer devirtualizes `invokevirtual` of a *final* method into `invokespecial`
-  (a final method binds statically). Standard bytecode forbids `invokespecial` to a superclass
-  method on a receiver not assignable to the current class, so HotSpot's verifier rejects it with
-  *"Incompatible object argument for invokespecial"*. The near-universal trigger is the
-  `x.getClass()` idiom - the NPE-guard the compiler inserts, and `this.getClass() != o.getClass()`
-  in `equals()` - where the receiver is a parameter, not `this`.
-- **Fix:** during bytecode translation, `invokespecial` whose target is one of
-  `java/lang/Object`'s final methods (`getClass`, `wait`, `notify`, `notifyAll`) is rewritten to
-  `invokevirtual`. Safe because these are final: virtual and non-virtual dispatch are identical
-  and no `super`-call is possible. Constructors (`<init>`), private-method calls, and genuine
-  `super.m()` (receiver `this`, verifies fine) are left untouched. Resolution needs the
-  methodref's class+name, so both const-pool build paths (`J9CONST.REF` and the
-  `J9CONST.LONG`-decoded ref) carry `ref_class`/`ref_name` into the transform table.
-- **Result:** the affected classes verify. (A pre-existing bug masked on `v51` classes by the
-  missing-stack-map error; it surfaced only once versions were capped at 49. It never affected
-  decompilation - VF/CFR render these classes fine either way.)
+  (a final method binds statically). That is not the original bytecode, and standard bytecode
+  forbids `invokespecial` to a superclass method on a receiver not assignable to the current
+  class, so HotSpot's verifier rejects e.g. `x.getClass()` / `otherThread.getName()` with
+  *"Incompatible object argument for invokespecial"*.
+- **Fix:** the romizer's own rule, read out of `j9vmall23.dll` (bcutil `sub_1001299C`, run on
+  every `invokevirtual` before romization): rewrite iff the target is one of
+  `java/lang/Object`'s six final methods (`wait()V`, `wait(J)V`, `wait(JI)V`, `notify()V`,
+  `notifyAll()V`, `getClass()Ljava/lang/Class;` - whatever class the reference names, javac
+  uses the static receiver type), or the reference names the class being romized and that
+  class itself declares the method `final` or `private`. Nothing else: not inherited finals,
+  not final classes, not `super.m()`. `_was_invokevirtual` inverts exactly that (private
+  calls were `invokespecial` already, so only own finals and Object finals go back).
+  A receiver-based heuristic was tried first; on MU1316 it agreed on 875 sites and wrongly
+  "restored" 2 inner-class `access$N01` super accessors (`this$0.super.m()`), which the exact
+  rule keeps.
+- **Result:** on MU1316, 2284 calls in 1366 methods go back to `invokevirtual`, whole-jar
+  `-Xverify:all` stays at 0 `VerifyError`, and the edge-case suite matches the original javac
+  bytecode opcode for opcode (`test/test_roundtrip_verify.py`).
 
-### Constant-pool tail integrity  (`src/jxe.py`, `src/constpool.py`)
-Verifying the whole jar with `-Xverify:all` surfaced three narrow correctness bugs in how the
-ROM constant pool is read:
-- **Dropped CP slot -> index shift.** The reader looped `rom_constant_pool_count` times and, on
-  `EOFError` from a slot whose pointer-chase ran off the end (J9 padding in the ram/rom-count
-  gap), silently skipped the entry - leaving the list one short, shifting every later CP index
-  by one and silently rewiring all references after it. Fixed by appending a placeholder constant
-  on `EOFError` so list indices stay aligned with ROM indices (`jxe.py`).
-- **Null/garbage CP entries reach the classfile.** Those padding slots can decode to a
-  `CONSTANT_Class` with an empty name, or a field/method ref whose name is really a type
-  descriptor (`Lx/Y;`) or whose descriptor is garbage (`JJTANDNODE`) - all rejected by the loader.
-  They are always unreferenced. `constpool.py` substitutes a valid placeholder name
-  (`java/lang/Object` for classes) and, via `_sanitized_ref`, replaces an illegal member
-  name/descriptor with an inert `_pad:Ljava/lang/Object;`. The descriptor check is exact (a
-  primitive descriptor is a single char - `JJTANDNODE` is *not* `long` just because it starts `J`).
-- **Net result:** whole-jar `-Xverify:all` -> **0 VerifyError, 0 ClassFormatError** (remaining
-  non-OK are benign: `java.*` classes the app loader refuses to define, and classes whose
-  supertypes live only in the external `libs/` jars).
+### Constant-pool slot typing  (`src/jxe.py`, `src/constpool.py`)
+A ROM constant-pool slot is two `u32` words and the words alone do not say what it is: a
+field/method ref is `{classRefCPIndex, SRP nameAndSignature}` and a long/double is `{low, high}`
+- any long whose high word happens to index a class slot looks like a ref, and a ref whose class
+index is large looks like a long. The old reader guessed, with a bound on the class index taken
+from the *image's class count* (a no-op on a 30k-class firmware, but on the 47-class edge-case
+image it turned every ref with class index >= 47 into a `Double`: `ManyConstants` ->
+`VerifyError: Illegal type in constant pool`).
+
+The ROM records the type; the reader now uses it (census: 3047 classes / ~150k slots, zero
+contradictions with the opcodes that reference each slot):
+- **`index >= ramConstantPoolCount`** - the ROM-only tail - holds every long/double and nothing
+  else. `ldc2_lw` / `ldc2_dw` at the use site decide long vs double.
+- **`cpShapeDescription`** (4 bits per RAM slot, LSB-first per little-endian `u32`): `1` string,
+  `2` class, `3` *static* field ref, `0` either a single-slot scalar (int/float, second word 0)
+  or a method / *instance* field ref (second word = SRP, never 0).
+- **Header word 19 = SRP to the "kind-run" stream** (found by reversing the romizer's
+  `bcutil`): runs of `{kindByte, count:u8, index[count]}` ended by `0xFF`, odd kindByte =
+  kind+1 with `u8` indices, even = `u16` indices; kinds `14` int, `16` float, `18` long, `6`
+  double, `20`/`22` instance/static field, `2`/`8`/`10`/`12` static/virtual/special/interface
+  method. So **int vs float and long vs double are exact**, no stack simulation (the old
+  simulation missed one float on MU1316 and is gone); the distinct `ldc2_lw`/`ldc2_dw`
+  opcodes are only a cross-check. Present in every class of every image seen (cases.jxe,
+  MU1316: 253828/253828 kinds agree with the referencing opcodes).
+- A ref's class index must land on a `2` slot; the one remaining fallback (an unreadable ref)
+  keeps the slot as an inert `INTEGER 0` *and prints a warning* - dropping a slot would shift
+  every later CP index. The `_sanitized_ref` placeholder for a garbage name/descriptor stays.
+- **Net result:** whole-jar `-Xverify:all` on MU1316 -> **0 VerifyError, 0 ClassFormatError**
+  (remaining non-OK are benign: `java.*` classes the app loader refuses to define, and classes
+  whose supertypes live only in bundle jars); edge-case suite 54/54.
 
 ### Modified UTF-8 for string constants  (`src/constpool.py`)
 Classfile `CONSTANT_Utf8` uses JVM **Modified UTF-8** (JVMS 4.4.7), not standard UTF-8. The
@@ -575,28 +599,23 @@ length **and data** of whichever record happened to follow it in the pool. On MU
 real layout and treats a zero length word as the empty string it is. Covered by
 `test/test_rom_string.py`.
 
-### Float constant recovery  (`src/bytecode.py`)
-J9 stores both `int` and `float` as `J9CONST.INT` (type 0) - the ROM format has **no int/float
-distinction**. Two passes recover the type:
-- **Linear stack simulation** (`_find_float_constants`) walks each method before translation,
-  tracking which `ldc`/`ldc_w` entries flow into float-consuming operations (`fstore`, `fadd`,
-  `fcmpg`, `putfield` with `F` descriptor, `invoke*` with `F` parameters, ...). Identified entries
-  are reclassified `CONST.INTEGER -> CONST.FLOAT` via `new_cp_transform`. It models `getfield`,
-  array loads, and other opcodes to keep parameter positions aligned with invoke descriptors.
-- **Ternary branches** (`_find_ternary_float_constants`): the linear pass clears its stack at
-  every branch, so a float constant in one arm of `cond ? A : B` is never seen flowing into the
-  consumer - it stays `int`, the other arm stays `float`, and decompilers throw *"No common
-  supertype for ternary expression"*. This pass pattern-matches the ternary shape
-  (`ifXX L1 ; armA ; goto L2 ; L1: armB ; L2:`) and, when one arm's terminal push is an int-ldc
-  and the other's is unambiguously float, reclassifies the int-ldc to float. int-vs-float is the
-  only trigger, so genuine ints are never mis-typed. This alone took the MU1316 LSD decompile
-  from 15 -> ~1 un-decompilable class. Bounds on the `goto`/`goto_w` offset (`T < l2 <= n`) are
-  load-bearing - without them a malformed offset crashes the whole class's conversion.
+The same reader also capped a record at 10000 bytes and fell back to `""` above that, which
+emptied every string constant over 10 KB - the JCL's CJK converter tables
+(`com/ibm/oti/io/CharacterConverter_*`, 27-41 KB each) came out as `""` in 29 `ldc`s and 11
+`ConstantValue`s on MU1316. The cap is the `u16` maximum now (`BigConstants` in the edge cases
+carries a 33 KB string).
 
-Constant handling also covers: `J9ROMField` constant slots emitted as `ConstantValue` for static
-final fields (int/float/long/double/String), recovered even when the CP slot is placeholder;
-INTEGER/FLOAT/LONG/DOUBLE/STRING/REF with preserved descriptors; and J9 ROM "LONG" slots decoded
-into proper field/method refs using ROM base offsets.
+### Float constant recovery  (`src/jxe.py`)
+`int` and `float` share the J9 CP slot shape (both "scalar, second word 0"), so earlier
+versions guessed the type with a linear stack simulation plus a ternary-shape matcher - and on
+MU1316 still missed one float. The romizer never lost the information: header word 19 points
+at a kind-run stream that lists every int, float, long and double slot (see
+[slot typing](#constant-pool-slot-typing--srcjxepy-srcconstpoolpy)), so `jxe.py` types the
+slot at parse time and `bytecode.py` only remaps the index. The simulation is gone.
+
+Constant handling also covers `J9ROMField` constant slots emitted as `ConstantValue` for static
+final fields (int/float/long/double/String; long/double are `{low, high}` in the field record,
+String is a `u16` ROM CP index).
 
 ### InnerClasses reconstruction from real ROM metadata  (`src/jxe2jar.py`, `src/jxe.py`)
 The `InnerClasses` attribute is rebuilt from the **actual J9 ROM fields**, not guessed from `$`
@@ -655,6 +674,10 @@ naming the constructor could lie. Covered by `test/test_anon_enclosing.py`.
 J9 keeps each method's declared checked exceptions (`throw_exceptions`), which the converter used
 to drop - so decompiled methods showed no `throws`. The standard `Exceptions` attribute is now
 emitted from them, and matches the original jars byte-for-byte where those are available.
+Native methods keep their `throws` too: their exception-info block (same `{catchCount,
+throwCount, ...}` layout as a bytecode method's, with zero catch entries) used to be skipped as
+opaque bytes, which lost 135 `throws` clauses on MU1316 (`com/ibm/oti/connection/comm/Connection`
+natives and the like).
 
 ### Generics / `Signature` attribute  (`src/jxe.py`, `src/jxe2jar.py`)
 Contrary to an earlier assumption, the J9 romizer **keeps** the generic `Signature` at all three
@@ -683,7 +706,16 @@ type-based names - a hard ROM limit, not a converter gap.
   `JBgenericReturn`/`JBreturnToMicroJIT` -> inferred from descriptor. J9 runtime/debug opcodes
   (`JBasyncCheck`, `JBbreakpoint`, `JBimpdep1`, `JBimpdep2`) -> `nop`.
 - **Code attribute:** always JVM-standard `u16/u16/u32` layout (stack/locals/code_len); exception
-  table offsets rewritten after bytecode expansion.
+  table offsets rewritten after bytecode expansion. The romizer pads each method's bytecode to a
+  `u32` boundary with `nop`s (the ROM stores the size in words); they can only follow a terminal
+  instruction, so the converter drops them - javac output never has them and they were 1.8 `nop`s
+  per method of pure noise in every diff.
+- **Field `ConstantValue` strings** are the ROM pool slot the field's constant word indexes, taken
+  verbatim. An old guard blanked the value whenever it equalled another field's *name*
+  (`KEY_SERVICE_MANAGER = "serviceManager"` next to a field `serviceManager`), which silently
+  emptied 6 constants on MU1316.
+- **`java/lang/Object`** gets `super_class = 0` as JVMS requires, not a CP entry with an empty
+  name.
 - **Flags:** `--strip-synthetic` clears `ACC_SYNTHETIC` on classes/methods/fields for strict
   tooling (preserved by default).
 
@@ -692,12 +724,19 @@ type-based names - a hard ROM limit, not a converter gap.
 The converter is validated through edge-case tests and a **JAR -> JXE -> JAR** round-trip:
 
 1. Build edge-case JAR: `sh test/custom_edgecases/build.sh`
-2. Convert JAR -> JXE with `jar2jxe.exe` (see [`vms/xp/README.md`](vms/xp/README.md))
-3. Convert JXE -> JAR with Python: `python3 src/jxe2jar.py input.jxe output.jar`
+2. Convert JAR -> JXE with the real `jar2jxe.exe`, unattended:
+   `python3 tools/wm5/host.py jar2jxe test/custom_edgecases/out/cases.jar test/custom_edgecases/out/cases.jxe --startup cases.Hello`
+   (see [`tools/wm5/README.md`](tools/wm5/README.md); the result is checked in)
+3. `python3 test/test_roundtrip_verify.py` converts it back and lets the JVM judge: every class
+   must pass JDK 8 `-Xverify:all` (`test/VerifyAll.java` links every class), carry version 46,
+   and match the original javac bytecode opcode for opcode (`ldc`/`ldc_w` masked)
 
-Plus two standalone unit checks (no framework, run them directly):
-`python3 test/test_rom_string.py` (J9UTF8 reader) and
-`python3 test/test_anon_enclosing.py` (anonymous-class `new`-site recovery).
+`pytest test/` runs that plus the unit checks (`test_rom_string` J9UTF8 reader,
+`test_anon_enclosing` anonymous-class `new`-site recovery, `test_devirtualize` the
+`invokespecial` restoration rule and float-argument detection, ...); each also runs standalone.
+
+`jar2jxe.exe` is a **WinCE ARM** binary (`j9jar2jxe23.dll` -> `j9bcutil_createRomClass`): it
+only runs in the WM5 Device Emulator inside the XP VM; `tools/wm5/` drives that VM headlessly.
 
 ## Usage Notes
 
@@ -708,8 +747,9 @@ Plus two standalone unit checks (no framework, run them directly):
   `.so` - 21 files on MU1316) are copied into the output jar; the ROM image is only its
   class half.
 - `ACC_SYNTHETIC` is preserved by default; `--strip-synthetic` for strict `javap` on 45.0 classes.
-- Classfile versions are inferred from flags (minimum 46) and never exceed 49 (keeps every class
-  on the stack-map-free inference verifier; see [Classfile version](#classfile-version--srcjxe2jarpy)).
+- Classfile version is 46, or 49 for classes with a Java 5 feature (never >= 50: keeps every
+  class on the stack-map-free inference verifier). `--major 46` forces one version everywhere,
+  e.g. for classes you patch and load on the device. See [Classfile version](#classfile-version--srcjxe2jarpy).
 - Some large binaries/ISOs are referenced via `.url` files pointing to original archives
   (`vms/xp/*.iso.url`).
 
