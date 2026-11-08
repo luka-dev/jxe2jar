@@ -107,3 +107,17 @@ vms/xp/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso
 vms/xp/Windows Mobile 5.0 Pocket PC SDK.msi
 vms/xp/Windows XP.utm/
 tools/*.class
+vms/xp/jobs/
+vms/xp/Windows XP.utm/Data/bootstrap.iso
+vms/xp/qemu.pid
+vms/xp/qmp.sock
+vms/xp/serve.log
+# IDA databases left next to the WEME binaries by analysis sessions
+vms/xp/mount-fs/weme/*.id0
+vms/xp/mount-fs/weme/*.id1
+vms/xp/mount-fs/weme/*.id2
+vms/xp/mount-fs/weme/*.nam
+vms/xp/mount-fs/weme/*.til
+vms/xp/mount-fs/weme/*.i64
+# Vineflower plugin build output (tools/vf-plugin/build.sh)
+tools/vf-plugin/build/

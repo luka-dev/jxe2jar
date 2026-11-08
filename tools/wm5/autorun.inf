@@ -1,0 +1,4 @@
+[autorun]
+shellexecute=bootstrap.vbs
+action=Install wm5-agent
+label=wm5-agent
