@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Replace enhanced-for artifacts only when compilation does not regress.
 
-Candidates come from recompile_check.py --json-report. RewriteForeach operates
-on temporary copies; --apply also checks the complete tree and aborts promotion
-if any previously passing file starts failing.
+Candidates come from recompile_check.py or isolated_compile_check.py --json-report.
+RewriteForeach operates on temporary copies. With a recompile_check report (one javac
+over the whole tree) --apply also re-checks the complete tree and aborts promotion if
+any previously passing file starts failing; with an isolated report every file is
+compiled alone, so a rewrite cannot affect other files and the per-candidate check is
+the gate.
 """
 
 import argparse
@@ -21,11 +24,18 @@ from recompile_check import DEF_JAVAC, DEF_OSGI
 HERE = Path(__file__).resolve().parent
 
 
+def message(diagnosis):
+    """recompile_check reports `first_error`, isolated_compile_check an `errors` list."""
+    return diagnosis.get("first_error") or "\n".join(diagnosis.get("errors") or [])
+
+
 def candidates(tree, report):
+    """(sorted [(path, rel)], isolated) - isolated = the report is isolated_compile_check's."""
     data = json.loads(Path(report).read_text())
+    isolated = any("errors" in diagnosis for diagnosis in data["reported_failures"].values())
     selected = []
     for raw, diagnosis in data["reported_failures"].items():
-        if "enhanced for loops are not supported" not in diagnosis["first_error"]:
+        if "enhanced for loops are not supported" not in message(diagnosis):
             continue
         path = Path(raw).resolve()
         try:
@@ -34,7 +44,7 @@ def candidates(tree, report):
             continue
         if path.is_file() and rel.suffix == ".java":
             selected.append((path, rel))
-    return sorted(selected, key=lambda pair: str(pair[1]))
+    return sorted(selected, key=lambda pair: str(pair[1])), isolated
 
 
 def main():
@@ -53,11 +63,11 @@ def main():
     args = parser.parse_args()
 
     tree, jar = args.tree.resolve(), args.jar.resolve()
-    selected = candidates(tree, args.diagnostics)
+    selected, isolated = candidates(tree, args.diagnostics)
     results = {}
     if selected:
         with tempfile.TemporaryDirectory(prefix="foreach_compile_fallback_") as directory:
-            work = Path(directory)
+            work = Path(directory).resolve()  # the isolated report keys are resolved paths
             paths = []
             for original, rel in selected:
                 candidate = work / rel
@@ -72,29 +82,41 @@ def main():
                 raise RuntimeError("RewriteForeach failed: " + rewrite.stderr[-1000:])
 
             report = work / "compile.json"
-            command = [sys.executable, str(HERE / "recompile_check.py"), str(work),
-                       "--jar", str(jar), "--osgi", str(args.osgi.resolve()),
-                       "--javac", str(args.javac), "--source", args.source,
-                       "--target", args.target or args.source,
-                       "--json-report", str(report), "--show", "0"]
+            if isolated:
+                command = [sys.executable, str(HERE / "isolated_compile_check.py"), str(work),
+                           "--jar", str(jar), "--libs", str(args.osgi.resolve()),
+                           "--javac", str(args.javac), "--source", args.source,
+                           "--target", args.target or args.source,
+                           "--filter-clashing-classes", "--json-report", str(report)]
+            else:
+                command = [sys.executable, str(HERE / "recompile_check.py"), str(work),
+                           "--jar", str(jar), "--osgi", str(args.osgi.resolve()),
+                           "--javac", str(args.javac), "--source", args.source,
+                           "--target", args.target or args.source,
+                           "--json-report", str(report), "--show", "0"]
             if args.jcl:
                 command += ["--jcl", str(args.jcl.resolve())]
             check = subprocess.run(command, capture_output=True, text=True)
             if check.returncode not in (0, 1) or not report.is_file():
-                raise RuntimeError("recompile_check failed: " + check.stderr[-1000:])
+                raise RuntimeError(command[1].rsplit("/", 1)[-1] + " failed: " + check.stderr[-1000:])
             failures = json.loads(report.read_text())["reported_failures"]
             for (original, rel), candidate in zip(selected, paths):
                 key = rel.as_posix()
                 if candidate.read_bytes() == original.read_bytes():
                     results[key] = {"status": "skipped", "reason": "no rewrite"}
                 elif str(candidate) in failures:
-                    results[key] = {"status": "skipped", "reason": failures[str(candidate)]["first_error"]}
+                    results[key] = {"status": "skipped", "reason": message(failures[str(candidate)])}
                 else:
                     results[key] = {"status": "would_apply"}
 
             accepted = [(original, rel, candidate) for (original, rel), candidate in zip(selected, paths)
                         if results[rel.as_posix()]["status"] == "would_apply"]
-            if args.apply and accepted:
+            if args.apply and accepted and isolated:
+                # files compile independently: a rewrite cannot change another file's result
+                for original, rel, candidate in accepted:
+                    shutil.copy2(candidate, original)
+                    results[rel.as_posix()] = {"status": "applied"}
+            elif args.apply and accepted:
                 staged = (work / "full_tree").resolve()
                 shutil.copytree(tree, staged)
                 for _, rel, candidate in accepted:
