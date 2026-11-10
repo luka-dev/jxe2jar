@@ -67,6 +67,44 @@ def repair(source, message):
     return (encoded[:first] + replacement.encode("utf-16-le") + encoded[last:]).decode("utf-16-le")
 
 
+def compile_all(work, jar, libs, jcl, source="1.4"):
+    """isolated_compile_check over the copies under `work`; returns its reported_failures."""
+    report = work.parent / (work.name + "_compile.json")
+    command = [sys.executable, str(HERE / "isolated_compile_check.py"), str(work),
+               "--jar", str(jar), "--libs", str(libs),
+               "--source", source, "--target", source, "--json-report", str(report)]
+    if jcl:
+        command += ["--jcl", str(jcl)]
+    checked = subprocess.run(command, capture_output=True, text=True)
+    if checked.returncode not in (0, 1) or not report.is_file():
+        raise RuntimeError("isolated compiler failed: " + checked.stderr[-1000:])
+    failures = json.loads(report.read_text())["reported_failures"]
+    report.unlink()
+    return failures
+
+
+def unbox(work, candidates, jar, libs, jcl, source="1.4", max_rounds=30):
+    """Repair the copies in place, one javac error per file per round, until nothing changes.
+    Returns ({candidate: patches}, failures of the final state)."""
+    patches = dict.fromkeys(candidates, 0)
+    for _ in range(max_rounds):
+        failures = compile_all(work, jar, libs, jcl, source)
+        changed = 0
+        for candidate in candidates:
+            errors = failures.get(str(candidate), {}).get("errors")
+            if not errors:
+                continue
+            before = candidate.read_text()
+            after = repair(before, errors[0])
+            if after is not None and after != before:
+                candidate.write_text(after)
+                patches[candidate] += 1
+                changed += 1
+        if not changed:
+            return patches, failures
+    return patches, compile_all(work, jar, libs, jcl, source)  # --max-rounds reached: re-check
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tree", type=Path)
@@ -95,55 +133,18 @@ def main():
     manifest = {}
     with tempfile.TemporaryDirectory(prefix="explicit_unboxing_") as directory:
         work = Path(directory).resolve()
+        copies = []
         for original, rel in selected:
             candidate = work / rel
             candidate.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original, candidate)
-            manifest[rel.as_posix()] = {"patches": 0, "status": "skipped"}
-        for _ in range(args.max_rounds):
-            report = work.parent / (work.name + "_compile.json")
-            command = [sys.executable, str(HERE / "isolated_compile_check.py"), str(work),
-                       "--jar", str(args.jar.resolve()), "--libs", str(args.libs.resolve()),
-                       "--source", "1.4", "--target", "1.4", "--json-report", str(report)]
-            if args.jcl:
-                command += ["--jcl", str(args.jcl.resolve())]
-            checked = subprocess.run(command, capture_output=True, text=True)
-            if checked.returncode not in (0, 1) or not report.is_file():
-                raise RuntimeError("isolated compiler failed: " + checked.stderr[-1000:])
-            failures = json.loads(report.read_text())["reported_failures"]
-            report.unlink()
-            changed = 0
-            for original, rel in selected:
-                candidate = work / rel
-                if str(candidate) not in failures:
-                    continue
-                errors = failures[str(candidate)]["errors"]
-                if not errors:
-                    continue
-                before = candidate.read_text()
-                after = repair(before, errors[0])
-                if after is not None and after != before:
-                    candidate.write_text(after)
-                    manifest[rel.as_posix()]["patches"] += 1
-                    changed += 1
-            if not changed:
-                break
-        # Check final copies even when the last round reached --max-rounds.
-        report = work.parent / (work.name + "_final.json")
-        command = [sys.executable, str(HERE / "isolated_compile_check.py"), str(work),
-                   "--jar", str(args.jar.resolve()), "--libs", str(args.libs.resolve()),
-                   "--source", "1.4", "--target", "1.4", "--json-report", str(report)]
-        if args.jcl:
-            command += ["--jcl", str(args.jcl.resolve())]
-        checked = subprocess.run(command, capture_output=True, text=True)
-        if checked.returncode not in (0, 1) or not report.is_file():
-            raise RuntimeError("final isolated compiler failed: " + checked.stderr[-1000:])
-        failures = json.loads(report.read_text())["reported_failures"]
-        report.unlink()
-        for original, rel in selected:
+            copies.append(candidate)
+        patches, failures = unbox(work, copies, args.jar.resolve(), args.libs.resolve(),
+                                  args.jcl and args.jcl.resolve(), max_rounds=args.max_rounds)
+        for (original, rel), candidate in zip(selected, copies):
             key = rel.as_posix()
-            candidate = work / rel
-            if manifest[key]["patches"] and str(candidate) not in failures:
+            manifest[key] = {"patches": patches[candidate], "status": "skipped"}
+            if patches[candidate] and str(candidate) not in failures:
                 if args.apply:
                     shutil.copy2(candidate, original)
                 manifest[key]["status"] = "applied" if args.apply else "would_apply"

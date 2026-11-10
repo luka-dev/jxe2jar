@@ -286,8 +286,11 @@ The report may come from `recompile_check.py` (one javac over the tree: with `--
 tool then stages the complete tree and refuses promotion if any previously passing file fails
 the full-tree check) or from `isolated_compile_check.py` (every file compiled alone: the
 candidates are re-checked the same way and a rewrite cannot change another file's result, so
-the per-candidate verdict is the gate). On MU1316 v8 the for-each artefact was the first error
-of 341 of the 761 version-aware failures.
+the per-candidate verdict is the gate). javac stops at the for-each syntax error, so whatever
+else the file needs at 1.4 only shows once the loop is rewritten: with an isolated report the
+rewritten copies therefore go through `explicit_unboxing.py`'s repair loop before the gate
+(`unboxed` in `--result` counts those patches). On MU1316 v8 the for-each artefact was the first
+error of 341 of the 761 version-aware failures.
 
 ```sh
 python3 tools/recompile_check.py out/final-vf --jar out/final.jar --jcl libs/jcl/<FW>/jcl.jar --json-report out/compile.json

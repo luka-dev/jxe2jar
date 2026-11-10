@@ -6,7 +6,9 @@ RewriteForeach operates on temporary copies. With a recompile_check report (one 
 over the whole tree) --apply also re-checks the complete tree and aborts promotion if
 any previously passing file starts failing; with an isolated report every file is
 compiled alone, so a rewrite cannot affect other files and the per-candidate check is
-the gate.
+the gate. javac stops at the for-each syntax error, so the rewritten copies are also run
+through explicit_unboxing's repair before the gate: the wrapper conversions it would
+have reported are only visible once the loop is a 1.4 iterator loop.
 """
 
 import argparse
@@ -18,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 
+from explicit_unboxing import unbox
 from recompile_check import DEF_JAVAC, DEF_OSGI
 
 
@@ -80,6 +83,11 @@ def main():
                 input="\n".join(map(str, paths)) + "\n", capture_output=True, text=True)
             if rewrite.returncode:
                 raise RuntimeError("RewriteForeach failed: " + rewrite.stderr[-1000:])
+            unboxed = {}
+            if isolated:
+                rewritten = [c for (o, _), c in zip(selected, paths) if c.read_bytes() != o.read_bytes()]
+                unboxed = unbox(work, rewritten, jar, args.osgi.resolve(), args.jcl and args.jcl.resolve(),
+                                args.source)[0]
 
             report = work / "compile.json"
             if isolated:
@@ -107,7 +115,7 @@ def main():
                 elif str(candidate) in failures:
                     results[key] = {"status": "skipped", "reason": message(failures[str(candidate)])}
                 else:
-                    results[key] = {"status": "would_apply"}
+                    results[key] = {"status": "would_apply", "unboxed": unboxed.get(candidate, 0)}
 
             accepted = [(original, rel, candidate) for (original, rel), candidate in zip(selected, paths)
                         if results[rel.as_posix()]["status"] == "would_apply"]
@@ -115,7 +123,7 @@ def main():
                 # files compile independently: a rewrite cannot change another file's result
                 for original, rel, candidate in accepted:
                     shutil.copy2(candidate, original)
-                    results[rel.as_posix()] = {"status": "applied"}
+                    results[rel.as_posix()]["status"] = "applied"
             elif args.apply and accepted:
                 staged = (work / "full_tree").resolve()
                 shutil.copytree(tree, staged)

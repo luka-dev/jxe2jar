@@ -64,33 +64,39 @@ def test_foreach_compiler_gate_isolated_report():
         work = Path(directory)
         tree = work / "source"
         tree.mkdir()
-        good, bad = tree / "Good.java", tree / "Bad.java"
+        good, bad, boxed = tree / "Good.java", tree / "Bad.java", tree / "Boxed.java"
         good.write_text("public class Good { int sum(int[] a) { int s = 0; for (int n : a) s += n; return s; } }\n")
         bad.write_text("public class Bad { int sum(int[] a) { int s = 0; for (int n : a) s += n; return s; } }\n")
-        subprocess.run([str(JDK8 / "javac"), "-source", "1.5", "-target", "1.5", str(good), str(bad)],
+        # the unboxing error is hidden behind the for-each syntax error until the loop is rewritten
+        boxed.write_text("public class Boxed { int sum(Integer[] a) { int s = 0; for (Integer n : a) { int v = n; s += v; } return s; } }\n")
+        subprocess.run([str(JDK8 / "javac"), "-source", "1.5", "-target", "1.5", str(good), str(bad), str(boxed)],
                        check=True, capture_output=True, text=True)
         jar = work / "classes.jar"
         with zipfile.ZipFile(jar, "w") as archive:
-            for name in ("Good", "Bad"):
+            for name in ("Good", "Bad", "Boxed"):
                 archive.write(tree / (name + ".class"), name + ".class")
         bad.write_text(bad.read_text().replace("return s", "return missing"))
         diagnostics = work / "isolated.json"
-        diagnostics.write_text(json.dumps({"files": 2, "passed": 0, "filtered_classpaths": 0, "reported_failures": {
+        diagnostics.write_text(json.dumps({"files": 3, "passed": 0, "filtered_classpaths": 0, "reported_failures": {
             str(path.resolve()): {"source": "1.4", "target": "1.4", "filtered_classes": [], "passed": False,
                                   "errors": ["1:40:0:0: enhanced for loops are not supported in -source 1.4"]}
-            for path in (good, bad)
+            for path in (good, bad, boxed)
         }}))
         command = [sys.executable, str(ROOT / "tools/foreach_compile_fallback.py"),
                    str(tree), str(jar), str(diagnostics), "--osgi", str(work)]
         dry = subprocess.run(command, check=True, capture_output=True, text=True)
-        assert "foreach compilable: 1/2" in dry.stdout, dry.stdout + dry.stderr
-        assert "for (int n : a)" in good.read_text()
+        assert "foreach compilable: 2/3" in dry.stdout, dry.stdout + dry.stderr
+        assert "for (int n : a)" in good.read_text() and "int v = n;" in boxed.read_text()
         applied = subprocess.run(command + ["--apply", "--result", str(work / "r.json")], check=True, capture_output=True, text=True)
-        assert "foreach compilable: 1/2" in applied.stdout
+        assert "foreach compilable: 2/3" in applied.stdout
         assert "for (int n : a)" not in good.read_text() and "return missing" in bad.read_text()
+        assert "int v = (n).intValue();" in boxed.read_text() and " : a)" not in boxed.read_text(), boxed.read_text()
         results = json.loads((work / "r.json").read_text())["results"]
-        assert results["Good.java"]["status"] == "applied" and results["Bad.java"]["status"] == "skipped"
-        assert "missing" in results["Bad.java"]["reason"]
+        assert results["Good.java"] == {"status": "applied", "unboxed": 0}
+        assert results["Boxed.java"] == {"status": "applied", "unboxed": 1}
+        assert results["Bad.java"]["status"] == "skipped" and "missing" in results["Bad.java"]["reason"]
+        assert subprocess.run([str(JDK8 / "javac"), "-source", "1.4", "-target", "1.4", "-cp", str(jar),
+                               str(good), str(boxed)], capture_output=True).returncode == 0
 
 
 if __name__ == "__main__":
