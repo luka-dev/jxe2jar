@@ -25,10 +25,10 @@ flowchart LR
 | [`decompile_fallback.py`](#decompile_fallbackpy) | repair | re-decompile VF stubs with CFR |
 | [`cfr_compile_fallback.py`](#cfr_compile_fallbackpy) | repair | replace failed VF files only when CFR source passes javac |
 | [`fix_vf_artifacts.py`](#fix_vf_artifactspy) | repair | fix remaining VF rendering errors (keywords, class literals, casts) |
-| [`repair_unreachable_clone_catches.py`](#repair_unreachable_clone_catchespy) | repair | remove clone catches proven unreachable by the firmware-JCL compiler |
 | [`int2hex.py`](#int2hexpy) | repair | decimal bitmasks/flags -> hex |
 | [`foreach1_4/`](#foreach1_4) | repair | enhanced for-each -> Java 1.4 loops (javaparser) |
 | [`foreach_compile_fallback.py`](#foreach_compile_fallbackpy) | repair | promote only compiler-passing for-each rewrites |
+| [`jcl_rebuild.py`](#jcl_rebuildpy) | setup | rebuild `libs/jcl/<FW>/` from a fresh combined jar |
 | [`nav_index.py`](#nav_indexpy) | analysis | "what is value N" / "who uses this constant" index |
 | [`xref.py`](#xrefpy) | analysis | bytecode cross-reference (callers/uses/dump) |
 | [`recompile_check.py`](#recompile_checkpy) | QA | round-trip gate: does the decompiled source recompile? |
@@ -244,18 +244,6 @@ and the top javac error categories. Used on the 16-jar corpus (README, "Round-tr
 python3 tools/decompile_oracle.py --orig orig.jar --rt roundtrip.jar --out out/oracle/foo --fix
 ```
 
-### `repair_unreachable_clone_catches.py`
-Some original classes catch `CloneNotSupportedException` around `clone()`, while the
-firmware JCL used for Java 1.4 compilation declares that call without the checked
-exception. This report-driven repair replaces only the rejected `try/catch` with
-its body as a scoped block. It requires an `isolated_compile_check.py` report;
-recompile the changed files afterward.
-
-```sh
-python3 tools/repair_unreachable_clone_catches.py out/MU1316-vf-isolated-compile.json
-python3 tools/repair_unreachable_clone_catches.py out/MU1316-vf-isolated-compile.json --apply
-```
-
 ### `int2hex.py`
 Decompilers emit all integers in decimal; bitmasks/flags read better in hex (`6291488 -> 0x600020`).
 Scores each literal (power of 2, all-ones mask, nibble-aligned, sparse/dense bits, nearby
@@ -340,6 +328,15 @@ python3 tools/recompile_check.py out/final-vf
 python3 tools/recompile_check.py out/final-vf --jcl libs/jcl/MHI2Q_US_AUG22_P5087_MU1316/jcl.jar
 ```
 `--json-report PATH` also writes per-file diagnostics for compiler-gated fallback tools.
+
+### `jcl_rebuild.py`
+`libs/jcl/<FW>/core-lsd.jar` is the converter's output for the core classes the apps use, so it
+must be rebuilt whenever the converter learns something (`python3 tools/jcl_rebuild.py
+out/<FW>-combined.jar libs/jcl/<FW>`: same class list, fresh bytes, `jcl.jar` re-merged with
+`ext/`). The July 2026 jars predate the native-method `throws` fix: their `Object.clone()` had no
+`CloneNotSupportedException`, javac then rejected every `catch` of it ("never thrown") and every
+`clone()` override that declares it (57 MU1316 files); a repair tool that deleted those catches
+has been removed. MU1316 was rebuilt 2026-11-10; MU1367 and MU1326 still carry the old bytes.
 
 ### `isolated_compile_check.py` and `explicit_unboxing.py`
 

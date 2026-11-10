@@ -28,6 +28,9 @@ Each folder:
   romizes the core XIP into the boot image (not a plain file in any extract), so only what the
   app references is recoverable. Closure-consistent, and complete for any reference the apps make.
 - `jcl.jar` - merged `ext` (device, wins on collision) + `core-lsd`. **Point `VF_JCL` here.**
+- Rebuild both after a converter fix with `python3 tools/jcl_rebuild.py out/<FW>-combined.jar libs/jcl/<FW>`
+  (same class list, fresh bytes). MU1316 rebuilt 2026-11-10 (native methods regained their
+  `throws`: `Object.clone()`, `Thread.sleep()`, ...); MU1367 / MU1326 are still the July build.
 
 Every folder has the same layout: `ext/`, `core-lsd.jar`, `jcl.jar`.
 
