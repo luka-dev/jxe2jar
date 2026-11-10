@@ -773,18 +773,21 @@ End to end on MU1316 (converter, donor, renamer plugin, `EnclosingMethod` for th
 anonymous classes, `fix_vf_artifacts`, `fix_javac_casts`, compile-gated chain) against the previous
 pipeline: the tree shrinks from 21249 to 20618 sources (631 standalone `Outer$N.java` fold into
 their outer classes), isolated compile at a uniform `-source 1.5` goes from 19799/21249 (93.2%) to
-20297/20618 (98.4%, failures 1450 -> 321), version-aware from 19719 to 20247 (failures 1530 -> 371),
+20331/20618 (98.6%, failures 1450 -> 287), version-aware from 19719 to 20380 (failures 1530 -> 238),
 `new X<>()` 126 -> 0, `varN` names 236 -> 145, generic JAD names (`obj`, `object3`) 23681 -> 15671 -
 the rest are real names from the donor. Nesting the anonymous classes moves 2 (uniform) / 19
 (version-aware) pre-existing failures from the standalone file into the outer one: for-each and
 auto-unboxing that Vineflower emits for 1.4 bytecode, `log(..., null)` overload ambiguity.
-`foreach_compile_fallback.py` (now reading isolated reports) turned 291 of the 341 for-each loops
-that javac 1.4 rejects back into iterator loops, 71 of them only after repairing the unboxing that
+`foreach_compile_fallback.py` (now reading isolated reports) turned 304 of the 341 for-each loops
+that javac 1.4 rejects back into iterator loops, 84 of them only after repairing the unboxing that
 the for-each syntax error had hidden from javac; `explicit_unboxing.py` now also spells out wrapper
-operands of `!`, the binary operators and `?:` (99 more files). The 50 for-each files left need
-repairs the chain does not cover (`log(..., null)` ambiguity, `CloneNotSupportedException`, for-each
-over non-`Iterable` types). The 321 left at 1.5 are overload ambiguity (41), `CloneNotSupportedException` (31) and `Integer`/`int`
-mismatches (35) that the compile-gated chain does not yet cover, plus ~100 missing dependencies.
+operands of `!`, the binary operators and `?:` (99 more files) and the `Boolean.valueOf(flag)`
+arguments Vineflower hid from `log(...)` calls, choosing the overload from the original class's
+constant pool (120 more files, and 34 fewer overload ambiguities at 1.5). The 37 for-each files left
+need repairs the chain does not cover (`CloneNotSupportedException`, for-each over non-`Iterable`
+types, `List` typed as `ArrayList`). The 287 left at 1.5 are 131 missing dependencies,
+`CloneNotSupportedException` (31), for-each over non-`Iterable` types (9), overload ambiguity (8)
+and a long tail.
 
 Coverage by package on MU1316: `de/audi` 17% of methods, `de/vw` 56%, `com/ibm`, `edu/emory`,
 `java/util` ~99%; `de/esolutions` and `org/dsi` 0% - the MH2p build of those has no `-g:vars`, so

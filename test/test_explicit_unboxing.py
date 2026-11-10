@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from explicit_unboxing import repair
+from explicit_unboxing import choose, javac_types, repair
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,7 +89,72 @@ def test_repair_operator_shapes():
     assert repair(source, message) == "this.active = Boolean.valueOf(active);"
 
 
+def test_repair_call_shapes():
+    """`no suitable method` names the actual argument types; the target overload comes from the
+    class's own constant pool (invoked) or, failing that, from javac's candidate list."""
+    assert javac_types("(ILjava/lang/String;[Ljava/util/Map$Entry;[[I)V") == \
+        ["int", "java.lang.String", "java.util.Map.Entry[]", "int[][]"]
+    assert choose(["int", "boolean"], [["int", "java.lang.Object"], ["java.lang.String", "boolean"]]) == ["", "box"]
+    assert choose(["java.lang.Integer", "boolean"], [["long", "boolean"], ["java.lang.Object", "java.lang.Object"]]) is None
+
+    source = 'void f(boolean flag) { this.channel\n    .log(1, "s(,)", flag, this.n); }'
+    candidates = ("method de.L.log(int,java.lang.String,java.lang.Object,java.lang.Object) is not applicable"
+                  "   (argument mismatch; boolean cannot be converted to java.lang.Object)"
+                  "   method de.L.log(int,java.lang.String,boolean,boolean) is not applicable"
+                  "   (argument mismatch; java.lang.Integer cannot be converted to boolean)")
+    message = "2:5:23:44: no suitable method found for log(int,java.lang.String,boolean,java.lang.Integer)   " + candidates
+    assert repair(source, message) == 'void f(boolean flag) { this.channel\n    .log(1, "s(,)", Boolean.valueOf(flag), this.n); }'
+    # a Boolean last argument fits both overloads with one conversion each: only the class's own
+    # constant pool, which holds the (boolean,boolean) descriptor, breaks the tie
+    message = message.replace("boolean,java.lang.Integer)", "boolean,java.lang.Boolean)")
+    assert repair(source, message) is None
+    invoked = {"log": [["int", "java.lang.String", "boolean", "boolean"]]}
+    assert repair(source, message, invoked) == 'void f(boolean flag) { this.channel\n    .log(1, "s(,)", flag, (this.n).booleanValue()); }'
+
+    source = "x = new Param(flag);"
+    message = ("1:5:4:19: no suitable constructor found for Param(boolean)   constructor de.Param.Param(java.lang.Boolean)"
+               " is not applicable   (argument mismatch; boolean cannot be converted to java.lang.Boolean)")
+    assert repair(source, message) == "x = new Param(Boolean.valueOf(flag));"
+
+
+def test_explicit_boxing_against_class_descriptors():
+    """Vineflower hides Boolean.valueOf(flag) in a call; javac 1.4 then finds no overload. The
+    constant pool of the original class says which overload was called."""
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        tree = work / "source"
+        tree.mkdir()
+        (tree / "Channel.java").write_text(
+            "public class Channel {\n"
+            "  public void log(int level, String text, Object a, Object b) {}\n"
+            "  public void log(int level, String text, boolean a, boolean b) {}\n}\n")
+        caller = tree / "Caller.java"
+        original = ("public class Caller {\n  Channel channel = new Channel();\n"
+                    "  void run(String s, boolean flag) { this.channel.log(1, \"x\", s, Boolean.valueOf(flag)); }\n}\n")
+        caller.write_text(original)
+        subprocess.run([str(JDK8 / "javac"), "-source", "1.4", "-target", "1.4", str(tree / "Channel.java"), str(caller)],
+                       check=True, capture_output=True)
+        jar = work / "classes.jar"
+        with zipfile.ZipFile(jar, "w") as archive:
+            for name in ("Channel", "Caller"):
+                archive.write(tree / (name + ".class"), name + ".class")
+        caller.write_text(original.replace("Boolean.valueOf(flag)", "flag"))
+        report = work / "compile.json"
+        check = [sys.executable, str(ROOT / "tools/isolated_compile_check.py"),
+                 str(tree), "--jar", str(jar), "--json-report", str(report)]
+        assert subprocess.run(check, capture_output=True).returncode == 1
+        assert "no suitable method found for log" in json.loads(report.read_text())["reported_failures"][str(caller.resolve())]["errors"][0]
+        fix = [sys.executable, str(ROOT / "tools/explicit_unboxing.py"),
+               str(tree), str(jar), str(report), "--libs", str(work), "--apply"]
+        applied = subprocess.run(fix, check=True, capture_output=True, text=True)
+        assert "explicit wrapper conversions: 1/1" in applied.stdout, applied.stdout + applied.stderr
+        assert caller.read_text() == original
+        assert subprocess.run(check, capture_output=True).returncode == 0
+
+
 if __name__ == "__main__":
     test_explicit_unboxing()
     test_repair_expression_shapes()
     test_repair_operator_shapes()
+    test_repair_call_shapes()
+    test_explicit_boxing_against_class_descriptors()

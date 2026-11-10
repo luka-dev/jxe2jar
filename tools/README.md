@@ -368,9 +368,14 @@ from `javac` to restore explicit wrapper conversion calls where Java 1.4 cannot
 use implicit boxing or unboxing: `X cannot be converted to Y` (the span is the
 expression), `bad operand type(s)` for `!` and the binary operators and
 `incompatible types for ?:` (the span is the whole expression and the column is
-the operator, so the wrapper operand on either side gets its `.xxxValue()`).
-One error per file per round, re-compiled until nothing changes. Only
-individually compiler-passing files are promoted with `--apply`. A passing isolated check establishes source syntax and
+the operator, so the wrapper operand on either side gets its `.xxxValue()`) and
+`no suitable method/constructor found` (Vineflower hid a `Boolean.valueOf(flag)`
+argument, so javac 1.4 finds no overload: the message names the actual argument
+types, the argument list follows the span, and the overload really called comes
+from the constant pool of the original class in `--jar`, which only holds the
+method references in use; javac's candidate list is the fallback and a tie
+means no repair). One error per file per round, re-compiled until nothing
+changes. Only individually compiler-passing files are promoted with `--apply`. A passing isolated check establishes source syntax and
 type consistency against the original binaries; it does not prove runtime
 equivalence or that all sources can be rebuilt together. Some class/package
 collisions require `--filter-clashing-classes`, which temporarily omits the
