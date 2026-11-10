@@ -61,6 +61,35 @@ def test_repair_expression_shapes():
     assert repair(source, message) == "consume(Boolean.valueOf(flag));"
 
 
+def test_repair_operator_shapes():
+    """Binary, unary and ?: operands are located from javac's column, which points at the operator."""
+    source = "if (!flag) {}"
+    message = "1:5:4:9: bad operand type java.lang.Boolean for unary operator '!'"
+    assert repair(source, message) == "if (!(flag).booleanValue()) {}"
+
+    source = "while (this.length > read) {}"
+    message = "1:20:7:25: bad operand types for binary operator '>'   first type:  java.lang.Integer   second type: int"
+    assert repair(source, message) == "while ((this.length).intValue() > read) {}"
+    message = "1:20:7:25: bad operand types for binary operator '>'   first type:  int   second type: java.lang.Integer"
+    assert repair(source, message) == "while (this.length > (read).intValue()) {}"
+    source = "x = a + b;"
+    message = "1:7:4:9: bad operand types for binary operator '+'\n  first type:  java.lang.Long\n  second type: java.lang.Long"
+    assert repair(source, message) == "x = (a).longValue() + (b).longValue();"
+
+    source = "return c != null ? (c) : f(\"?:\", a ? 1 : 2);"
+    message = "1:18:7:43: incompatible types for ?: neither is a subtype of the other   second operand: java.lang.Long   third operand : long"
+    assert repair(source, message) == "return c != null ? ((c)).longValue() : f(\"?:\", a ? 1 : 2);"
+    message = "1:18:7:43: incompatible types for ?: neither is a subtype of the other   second operand: int   third operand : java.lang.Integer"
+    assert repair(source, message) == "return c != null ? (c) : (f(\"?:\", a ? 1 : 2)).intValue();"
+    message = "1:18:7:43: incompatible types for ?: neither is a subtype of the other   second operand: java.io.Reader   third operand : java.io.Writer"
+    assert repair(source, message) is None
+
+    source = "this.active = active;"
+    message = "1:15:14:20: incompatible types: boolean cannot be converted to java.lang.Boolean"
+    assert repair(source, message) == "this.active = Boolean.valueOf(active);"
+
+
 if __name__ == "__main__":
     test_explicit_unboxing()
     test_repair_expression_shapes()
+    test_repair_operator_shapes()

@@ -365,8 +365,12 @@ python3 tools/explicit_unboxing.py out/MU1316-vf out/MU1316-final.jar \
 
 `explicit_unboxing.py` works on temporary copies. It uses the exact error span
 from `javac` to restore explicit wrapper conversion calls where Java 1.4 cannot
-use implicit boxing or unboxing. Only individually compiler-passing files are
-promoted with `--apply`. A passing isolated check establishes source syntax and
+use implicit boxing or unboxing: `X cannot be converted to Y` (the span is the
+expression), `bad operand type(s)` for `!` and the binary operators and
+`incompatible types for ?:` (the span is the whole expression and the column is
+the operator, so the wrapper operand on either side gets its `.xxxValue()`).
+One error per file per round, re-compiled until nothing changes. Only
+individually compiler-passing files are promoted with `--apply`. A passing isolated check establishes source syntax and
 type consistency against the original binaries; it does not prove runtime
 equivalence or that all sources can be rebuilt together. Some class/package
 collisions require `--filter-clashing-classes`, which temporarily omits the

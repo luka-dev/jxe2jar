@@ -773,16 +773,17 @@ End to end on MU1316 (converter, donor, renamer plugin, `EnclosingMethod` for th
 anonymous classes, `fix_vf_artifacts`, `fix_javac_casts`, compile-gated chain) against the previous
 pipeline: the tree shrinks from 21249 to 20618 sources (631 standalone `Outer$N.java` fold into
 their outer classes), isolated compile at a uniform `-source 1.5` goes from 19799/21249 (93.2%) to
-20295/20618 (98.4%, failures 1450 -> 323), version-aware from 19719 to 20126 (failures 1530 -> 492),
+20297/20618 (98.4%, failures 1450 -> 321), version-aware from 19719 to 20247 (failures 1530 -> 371),
 `new X<>()` 126 -> 0, `varN` names 236 -> 145, generic JAD names (`obj`, `object3`) 23681 -> 15671 -
 the rest are real names from the donor. Nesting the anonymous classes moves 2 (uniform) / 19
 (version-aware) pre-existing failures from the standalone file into the outer one: for-each and
 auto-unboxing that Vineflower emits for 1.4 bytecode, `log(..., null)` overload ambiguity.
-`foreach_compile_fallback.py` (now reading isolated reports) turned 269 of the 341 for-each loops
-that javac 1.4 rejects back into iterator loops, the last 49 only after repairing the unboxing that
-the for-each syntax error had hidden from javac; the 72 others need repairs the chain does not cover
-(wrapper operands of `?:`, `==`, `!`, `log(..., null)` ambiguity, for-each over non-`Iterable`
-types). The 323 left at 1.5 are overload ambiguity (41), `CloneNotSupportedException` (31) and `Integer`/`int`
+`foreach_compile_fallback.py` (now reading isolated reports) turned 291 of the 341 for-each loops
+that javac 1.4 rejects back into iterator loops, 71 of them only after repairing the unboxing that
+the for-each syntax error had hidden from javac; `explicit_unboxing.py` now also spells out wrapper
+operands of `!`, the binary operators and `?:` (99 more files). The 50 for-each files left need
+repairs the chain does not cover (`log(..., null)` ambiguity, `CloneNotSupportedException`, for-each
+over non-`Iterable` types). The 321 left at 1.5 are overload ambiguity (41), `CloneNotSupportedException` (31) and `Integer`/`int`
 mismatches (35) that the compile-gated chain does not yet cover, plus ~100 missing dependencies.
 
 Coverage by package on MU1316: `de/audi` 17% of methods, `de/vw` 56%, `com/ibm`, `edu/emory`,
