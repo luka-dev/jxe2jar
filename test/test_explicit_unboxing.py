@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from explicit_unboxing import choose, javac_types, repair
+from explicit_unboxing import choose, javac_types, repair, repair_all, spell
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,9 +152,91 @@ def test_explicit_boxing_against_class_descriptors():
         assert subprocess.run(check, capture_output=True).returncode == 0
 
 
+def test_repair_throws_shape():
+    src = (
+        "package p;\n\nimport java.io.IOException;\n\npublic class A {\n"
+        "    static final String BRACE = \"{\";\n\n"
+        "    public void a() {\n        if (this.d == null) {\n            throw new IOException(\"x\");\n        }\n    }\n\n"
+        "    void b(int n) throws Exception {\n        if (n > 0) {\n        } else if (n < 0) {\n            c();\n        }\n    }\n\n"
+        "    void d() {\n        new Thread() {\n            public void run() {\n                e();\n            }\n        }.start();\n    }\n\n"
+        "    static {\n        f();\n    }\n}\n")
+    lines = src.split("\n")
+    offset = lambda line: sum(len(l) + 1 for l in lines[:line - 1])
+    def message(line, exception):
+        start = offset(line) + len(lines[line - 1]) - len(lines[line - 1].lstrip())
+        return "%d:1:%d:%d: unreported exception %s; must be caught or declared to be thrown" % (
+            line, start, start + 3, exception)
+    out = repair(src, message(10, "java.io.IOException"))
+    assert "    public void a() throws IOException {\n" in out, out
+    assert out.replace(" throws IOException", "") == src
+    out = repair(src, message(17, "java.net.MalformedURLException"))
+    assert "    void b(int n) throws Exception, java.net.MalformedURLException {\n" in out, out
+    out = repair(src, message(24, "p.Oops"))
+    assert "            public void run() throws Oops {\n" in out, out
+    assert repair(src, message(31, "java.io.IOException")) is None
+
+
+def test_boxing_spelling():
+    assert repair("Object o = n;", "1:12:11:12: incompatible types: int cannot be converted to java.lang.Object") == "Object o = new Integer(n);"
+    assert repair("Long l = n;", "1:10:9:10: incompatible types: long cannot be converted to java.lang.Long") == "Long l = new Long(n);"
+    assert repair("f( n );", "1:1:0:1: no suitable method found for f(int)\n    method A.f(java.lang.Object) is not applicable") == "f( new Integer(n) );"
+
+
+def test_casts_generics_and_rounds():
+    src = ("package p.q;\n\nimport java.util.Map;\nimport de.x.Outer;\nimport de.y.Deep.Inner;\n\n"
+           "public class A {\n    Map<String, Stack<State[]>> m;\n    void f() {\n        IContext c = Preconditions.checkNotNull(x);\n"
+           "        String[] a = list.toArray();\n        long l = n;\n        Object o = flag ? a : b;\n    }\n}\n")
+    assert spell(src, "p.q.IContext") == "IContext" and spell(src, "de.x.Outer.Nested[]") == "Outer.Nested[]"
+    assert spell(src, "de.y.Deep.Inner") == "Inner" and spell(src, "de.z.Far") == "de.z.Far"
+    def message(needle, text):
+        a = src.index(needle)
+        return "%d:1:%d:%d: %s" % (src[:a].count("\n") + 1, a, a + len(needle), text)
+    out = repair(src, message("Preconditions.checkNotNull(x)", "incompatible types: java.lang.Object cannot be converted to p.q.IContext"))
+    assert "IContext c = (IContext) Preconditions.checkNotNull(x);" in out, out
+    out = repair(src, message("list.toArray()", "incompatible types: java.lang.Object[] cannot be converted to java.lang.String[]"))
+    assert "String[] a = (String[]) list.toArray();" in out, out
+    assert repair(src, message("flag ? a : b", "incompatible types: boolean cannot be converted to int")) is None
+    a = src.index("l = n;") + 4
+    out = repair(src, "%d:1:%d:%d: incompatible types: java.lang.Integer cannot be converted to long" % (src[:a].count("\n") + 1, a, a + 1))
+    assert "long l = (n).intValue();" in out, out
+    out = repair(src, "8:8:%d:%d: generics are not supported in -source 1.4" % ((src.index("<"),) * 2))
+    assert "    Map m;\n" in out and "<" not in out, out
+    # one round applies both spans, later one first; the generics error alone rewrites the file
+    both = repair_all(src, [message("list.toArray()", "incompatible types: java.lang.Object[] cannot be converted to java.lang.String[]"),
+                            message("Preconditions.checkNotNull(x)", "incompatible types: java.lang.Object cannot be converted to p.q.IContext")])
+    assert "(IContext) Preconditions" in both and "(String[]) list.toArray()" in both, both
+
+
+def test_ternary_targets_and_anonymous_overrides():
+    src = ("package p;\n\npublic class A {\n    private Handler handler;\n\n"
+           "    Reader open(boolean internal) {\n        return internal ? new CharArrayReader(this.value) : this.reader;\n    }\n\n"
+           "    void pick(int i) {\n        Ops ops;\n        ops = i == 0 ? this.left : this.right;\n"
+           "        this.handler = i > 0 ? this.handlers[i] : this.fallback;\n        Object o = new Consumer2() {\n"
+           "            public void accept(State a, final Device b) {\n                use(a, b);\n            }\n        };\n    }\n}\n")
+    def ternary(needle, second, third):
+        a = src.index(needle)
+        q = src.index("?", a)
+        text = "incompatible types for ?: neither is a subtype of the other\n  second operand: %s\n  third operand : %s" % (second, third)
+        return "%d:%d:%d:%d: %s" % (src[:a].count("\n") + 1, q - src.rfind("\n", 0, q), a, a + len(needle), text)
+    out = repair(src, ternary("internal ? new CharArrayReader(this.value) : this.reader", "java.io.CharArrayReader", "p.XMLInputReader"))
+    assert "return internal ? (Reader) new CharArrayReader(this.value) : this.reader;" in out, out
+    out = repair(src, ternary("i == 0 ? this.left : this.right", "p.LeftOps", "p.RightOps"))
+    assert "ops = i == 0 ? (Ops) this.left : this.right;" in out, out
+    out = repair(src, ternary("i > 0 ? this.handlers[i] : this.fallback", "p.ButtonHandler", "p.DefaultHandler"))
+    assert "this.handler = i > 0 ? (Handler) this.handlers[i] : this.fallback;" in out, out
+    line = src[:src.index("new Consumer2()")].count("\n") + 1
+    out = repair(src, "%d:20:0:1: <anonymous p.A$1> is not abstract and does not override abstract method accept(java.lang.Object,java.lang.Object) in p.Consumer2" % line)
+    assert ("            public void accept(Object a_, Object b_) {\n                State a = (State) a_;\n"
+            "                Device b = (Device) b_;\n                use(a, b);\n") in out, out
+
+
 if __name__ == "__main__":
     test_explicit_unboxing()
     test_repair_expression_shapes()
     test_repair_operator_shapes()
     test_repair_call_shapes()
     test_explicit_boxing_against_class_descriptors()
+    test_repair_throws_shape()
+    test_boxing_spelling()
+    test_casts_generics_and_rounds()
+    test_ternary_targets_and_anonymous_overrides()

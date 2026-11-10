@@ -773,24 +773,36 @@ End to end on MU1316 (converter, donor, renamer plugin, `EnclosingMethod` for th
 anonymous classes, `fix_vf_artifacts`, `fix_javac_casts`, compile-gated chain) against the previous
 pipeline: the tree shrinks from 21249 to 20618 sources (631 standalone `Outer$N.java` fold into
 their outer classes), isolated compile at a uniform `-source 1.5` goes from 19799/21249 (93.2%) to
-20362/20618 (98.8%, failures 1450 -> 256), version-aware from 19719 to 20416 (failures 1530 -> 202),
+20394/20618 (98.9%, failures 1450 -> 224), version-aware from 19719 to 20500 (failures 1530 -> 118),
 `new X<>()` 126 -> 0, `varN` names 236 -> 145, generic JAD names (`obj`, `object3`) 23681 -> 15671 -
 the rest are real names from the donor. Nesting the anonymous classes moves 2 (uniform) / 19
 (version-aware) pre-existing failures from the standalone file into the outer one: for-each and
 auto-unboxing that Vineflower emits for 1.4 bytecode, `log(..., null)` overload ambiguity.
-`foreach_compile_fallback.py` (now reading isolated reports) turned 313 of the 341 for-each loops
+`foreach_compile_fallback.py` (now reading isolated reports) turned 316 of the 336 for-each loops
 that javac 1.4 rejects back into iterator loops, most of the late ones only after repairing the
-unboxing that the for-each syntax error had hidden from javac; `explicit_unboxing.py` now also
-spells out wrapper operands of `!`, the binary operators and `?:` (99 more files) and the
-`Boolean.valueOf(flag)` arguments Vineflower hid from `log(...)` calls, choosing the overload from
-the original class's constant pool (120 more files, and 34 fewer overload ambiguities at 1.5).
-Rebuilding `libs/jcl/MHI2Q_US_AUG22_P5087_MU1316/` with the fixed converter (`tools/jcl_rebuild.py`;
-the July jars had lost the `throws` of native methods such as `Object.clone()`) let 57 more files
-compile: 36 whose `catch (CloneNotSupportedException)` a since-deleted repair tool had removed and
-21 `clone()` overrides javac rejected against the old JCL. The 28 for-each files left need repairs
-the chain does not cover (for-each over non-`Iterable` types, `List` typed as `ArrayList`). The 256
-left at 1.5 are 131 missing dependencies, for-each over non-`Iterable` types (9), overload
-ambiguity (8), `java.nio.Buffer` constructors (7) and a long tail.
+unboxing that the for-each syntax error had hidden from javac. `explicit_unboxing.py` grew from the
+one `X cannot be converted to Y` shape into the diagnostic-driven 1.4 repair described in
+[tools/README.md](tools/README.md#isolated_compile_checkpy-and-explicit_unboxingpy): wrapper
+operands of `!`, the binary operators and `?:`, the `Boolean.valueOf(flag)` arguments Vineflower
+hid from `log(...)` calls (overload chosen from the original class's constant pool; numbers box as
+`new Integer(x)`, the CDC 1.1 JCL has no `Integer.valueOf(int)`), the `throws` clauses the
+obfuscated `de/eso` classes lost (none of their 581 methods kept an Exceptions attribute), the
+reference casts Vineflower drops next to a generic API (`(IContext) Preconditions.checkNotNull(x)`),
+the type arguments it prints into 1.4 classes (erased; the anonymous classes' parameters go back to
+`Object` plus a cast on entry) and the cast a 1.4 ternary of unrelated operands needs - 607 of 639
+candidates in the v9 cycle, every repairable error of a file per round. Rebuilding
+`libs/jcl/MHI2Q_US_AUG22_P5087_MU1316/` with the fixed converter (`tools/jcl_rebuild.py`; the July
+jars had lost the `throws` of native methods such as `Object.clone()`) let 57 more files compile:
+36 whose `catch (CloneNotSupportedException)` a since-deleted repair tool had removed and 21
+`clone()` overrides javac rejected against the old JCL; `fix_vf_artifacts.py` learned the
+self-referencing `MAX_VALUE = MAX_VALUE` constants of `java/lang/{Integer,Long,Float,Double,Math}.java`
+and `int flag = false`; the isolated check keeps the firmware JCL on the plain classpath of
+major-49 files so the device's `org.conscrypt` classes resolve. The 118 left version-aware (v9
+full cycle, 2026-11-10) are 39 missing dependencies, 20 for-each loops over types that are not
+`Iterable` (Vineflower matched an `iterator(args)` call), 9 `catch` clauses whose obfuscated callee
+lost its `throws` (the class file needs repairing, not the source), 8 generics leftovers and a long
+tail; the 224 at 1.5 are 123 missing dependencies, `java.*` sources measured against the JDK
+instead of the firmware JCL (`java.nio.Buffer` constructors, `isSynthetic()`) and the same tail.
 
 Coverage by package on MU1316: `de/audi` 17% of methods, `de/vw` 56%, `com/ibm`, `edu/emory`,
 `java/util` ~99%; `de/esolutions` and `org/dsi` 0% - the MH2p build of those has no `-g:vars`, so

@@ -197,7 +197,10 @@ This smaller postprocessor handles separate rendering errors: `<unrepresentable>
 classes, keyword-derived variable names, duplicate intersection casts, raw `toArray(T[])` calls in
 any position, old-compiler `class$(String)` calls and both cache-ternary orders
 (`f == null ? (f = X.class) : f` and javac 1.1's `f != null ? f : (f = X.class)`), and the
-diamond `new X<>()` Vineflower writes even into 1.4 code (Java 7 syntax, raw call on 1.5).
+diamond `new X<>()` Vineflower writes even into 1.4 code (Java 7 syntax, raw call on 1.5),
+the self-referencing constants Vineflower names inside their own class (`java/lang/Double.java`:
+`MAX_VALUE = MAX_VALUE;` -> the literal; Integer, Long, Float, Double, Math), a boolean literal
+in an `int` slot (`int flag = false;` -> `0`, a dead store typed by inference) and `(boolean)0`.
 
 ```sh
 python3 tools/fix_vf_artifacts.py out/final-vf            # report
@@ -336,7 +339,9 @@ out/<FW>-combined.jar libs/jcl/<FW>`: same class list, fresh bytes, `jcl.jar` re
 `ext/`). The July 2026 jars predate the native-method `throws` fix: their `Object.clone()` had no
 `CloneNotSupportedException`, javac then rejected every `catch` of it ("never thrown") and every
 `clone()` override that declares it (57 MU1316 files); a repair tool that deleted those catches
-has been removed. MU1316 was rebuilt 2026-11-10; MU1367 and MU1326 still carry the old bytes.
+has been removed. MU1316 and MU1326 were rebuilt 2026-11-10 (130 methods each regained their
+`throws`); MU1367 still carries the July bytes because its `lsd.jxe` is not on disk (only the
+firmware zip without it and the M.I.B. patch folders are).
 
 ### `isolated_compile_check.py` and `explicit_unboxing.py`
 
@@ -345,7 +350,9 @@ firmware contains JVM-valid class/package name collisions that `javac` cannot
 compile as one tree. The isolated check compiles each source in a fresh
 task against the original class JAR and reports its first error. It selects
 Java 1.4 plus the firmware JCL for original classfile versions 45–48, and
-Java 1.5 plus the JDK 8 boot classes for version 49. Put supplemental compiler
+Java 1.5 plus the JDK 8 boot classes for version 49; the firmware JCL then sits on the
+plain classpath so the device's ext classes (`org.conscrypt`, `com.ibm.oti.net...`) still
+resolve where the JDK has none. Put supplemental compiler
 dependencies, including JUnit 3.8.2 for bundled test classes, in `libs/`.
 The bundled `junit-3.8.2.jar` is the [Maven Central artifact](https://repo.maven.apache.org/maven2/junit/junit/3.8.2/junit-3.8.2.jar)
 (SHA-1 `07e4cde26b53a9a0e3fe5b00d1dbbc7cc1d46060`).
@@ -361,18 +368,37 @@ python3 tools/explicit_unboxing.py out/MU1316-vf out/MU1316-final.jar \
 ```
 
 `explicit_unboxing.py` works on temporary copies. It uses the exact error span
-from `javac` to restore explicit wrapper conversion calls where Java 1.4 cannot
-use implicit boxing or unboxing: `X cannot be converted to Y` (the span is the
-expression), `bad operand type(s)` for `!` and the binary operators and
+from `javac` to restore what Java 1.4 sources need: `X cannot be converted to Y`
+(the span is the expression: wrapper to primitive gets `.xxxValue()`, widened
+afterwards when `Integer` meets `long`; primitive to `Object` or wrapper gets
+boxed; reference to reference gets the cast `(Y) expr` Vineflower dropped as
+redundant next to a generic API such as `Preconditions.checkNotNull`, spelled
+simple, `Outer.Inner` or qualified as the imports allow), `generics are not
+supported in -source 1.4` (javac stops parsing at the first `<`, so every
+type-argument list in the file is erased at once; 1.4 classes carry no Signature
+attribute, the generics came from the API they call; when the erased anonymous
+class then "does not override abstract method accept(Object)", its method takes
+`Object` parameters and casts them on entry, as 1.4 code did), `bad operand type(s)` for `!` and the binary operators and
 `incompatible types for ?:` (the span is the whole expression and the column is
-the operator, so the wrapper operand on either side gets its `.xxxValue()`) and
+the operator, so the wrapper operand on either side gets its `.xxxValue()`; two
+unrelated reference operands get the declared target type of the assignment or
+`return` as a cast on the first, javac 1.4 having no least upper bound) and
 `no suitable method/constructor found` (Vineflower hid a `Boolean.valueOf(flag)`
 argument, so javac 1.4 finds no overload: the message names the actual argument
 types, the argument list follows the span, and the overload really called comes
 from the constant pool of the original class in `--jar`, which only holds the
 method references in use; javac's candidate list is the fallback and a tie
-means no repair). One error per file per round, re-compiled until nothing
-changes. Only individually compiler-passing files are promoted with `--apply`. A passing isolated check establishes source syntax and
+means no repair; numbers are boxed as `new Integer(x)` because the CDC 1.1 JCL
+has no `Integer.valueOf(int)`, see the `javap` trap below) and `unreported exception X; must be caught or declared`
+(the obfuscated `de/eso/*` classes lost their Exceptions attribute, 0 of 581
+methods keep one: the enclosing method or constructor declaration, found by
+walking up over block statements and anonymous class bodies, gets `throws X`,
+spelled simple when imported, same-package or `java.lang`). The matching
+`exception X is never thrown` catch in a caller stays: that needs the callee's
+class file repaired, not its source. Every repairable error of a file per round, last span
+first so the earlier offsets stay valid (a throws clause or generics erasure moves text and ends
+the round), re-compiled until nothing changes or a repair leaves the same errors. Only
+individually compiler-passing files are promoted with `--apply`. A passing isolated check establishes source syntax and
 type consistency against the original binaries; it does not prove runtime
 equivalence or that all sources can be rebuilt together. Some class/package
 collisions require `--filter-clashing-classes`, which temporarily omits the

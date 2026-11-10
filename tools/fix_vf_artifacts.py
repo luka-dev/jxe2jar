@@ -63,6 +63,26 @@ CLASS_DOLLAR_CACHE_NE = re.compile(
     r"\(\s*(?P=field)\s*=\s*(?P<literal>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\.class)\s*\)"
 )
 
+# Vineflower names Integer.MAX_VALUE & co. and drops the qualifier inside the owning class,
+# so java/lang/{Integer,Long,Float,Double,Math}.java read `MAX_VALUE = MAX_VALUE`.
+SELF_CONSTANT = re.compile(
+    r"^(\s*(?:public |protected |private )?static final (int|long|float|double) "
+    r"(MIN_VALUE|MAX_VALUE|NaN|POSITIVE_INFINITY|NEGATIVE_INFINITY|E|PI) = )\3;$", re.M)
+SELF_CONSTANTS = {
+    ("int", "MIN_VALUE"): "-2147483648", ("int", "MAX_VALUE"): "2147483647",
+    ("long", "MIN_VALUE"): "-9223372036854775808L", ("long", "MAX_VALUE"): "9223372036854775807L",
+    ("float", "MIN_VALUE"): "1.4E-45F", ("float", "MAX_VALUE"): "3.4028235E38F",
+    ("float", "NaN"): "0.0F / 0.0F", ("float", "POSITIVE_INFINITY"): "1.0F / 0.0F",
+    ("float", "NEGATIVE_INFINITY"): "-1.0F / 0.0F",
+    ("double", "MIN_VALUE"): "4.9E-324", ("double", "MAX_VALUE"): "1.7976931348623157E308",
+    ("double", "NaN"): "0.0 / 0.0", ("double", "POSITIVE_INFINITY"): "1.0 / 0.0",
+    ("double", "NEGATIVE_INFINITY"): "-1.0 / 0.0",
+    ("double", "E"): "2.718281828459045", ("double", "PI"): "3.141592653589793",
+}
+# a dead `iconst_0` store typed boolean by inference but declared int: `int flag = false;`
+BOOL_AS_INT = re.compile(r"\b(int|long|short|byte|char)( \w+ = )(true|false);")
+BOOL_CAST = re.compile(r"\(boolean\)\s*([01])\b")
+
 
 def fix_dangling_outer_field(text):
     """Standalone Outer$N classes can lack a declared constructor-assigned this$0."""
@@ -110,7 +130,12 @@ def fix_text(text):
     text, outers = fix_dangling_outer_field(text)
     text, params = fix_navigation_param_alias(text)
     text, literals = fix_class_dollar_literals(text)
-    return text, n + keywords + intersections + arrays + diamonds + outers + params + literals
+    text, constants = SELF_CONSTANT.subn(
+        lambda m: m.group(1) + SELF_CONSTANTS.get((m.group(2), m.group(3)), m.group(3)) + ";", text)
+    text, booleans = BOOL_AS_INT.subn(lambda m: m.group(1) + m.group(2) + ("1" if m.group(3) == "true" else "0") + ";", text)
+    text, casts = BOOL_CAST.subn(lambda m: "true" if m.group(1) == "1" else "false", text)
+    return text, (n + keywords + intersections + arrays + diamonds + outers + params + literals
+                  + constants + booleans + casts)
 
 
 def main():

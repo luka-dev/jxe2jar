@@ -30,7 +30,9 @@ Each folder:
 - `jcl.jar` - merged `ext` (device, wins on collision) + `core-lsd`. **Point `VF_JCL` here.**
 - Rebuild both after a converter fix with `python3 tools/jcl_rebuild.py out/<FW>-combined.jar libs/jcl/<FW>`
   (same class list, fresh bytes). MU1316 rebuilt 2026-11-10 (native methods regained their
-  `throws`: `Object.clone()`, `Thread.sleep()`, ...); MU1367 / MU1326 are still the July build.
+  `throws`: `Object.clone()`, `Thread.sleep()`, ...), MU1326 the same day from a fresh conversion
+  of its `lsd.jxe` (all 996 core classes come from the base jxe); MU1367 is still the July build:
+  its `lsd.jxe` is not on disk.
 
 Every folder has the same layout: `ext/`, `core-lsd.jar`, `jcl.jar`.
 

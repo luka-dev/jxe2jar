@@ -5,7 +5,8 @@ This is the round-trip source gate for corpora that cannot be passed to one
 javac invocation: JVM class names can legally clash with Java package names,
 and an error in one source can mask later errors in another. The optional
 version-aware mode uses Java 1.4 plus the firmware JCL for classfile major
-versions up to 48, and Java 1.5 with JDK 8's boot classes for major 49.
+versions up to 48, and Java 1.5 with JDK 8's boot classes for major 49 (the firmware JCL
+then sits on the plain classpath so its ext classes still resolve).
 """
 
 import argparse
@@ -112,7 +113,9 @@ def main():
                     filtered_jars[excluded] = filtered
                 else:
                     filtered_jars[excluded] = jar
-            classpath = os.pathsep.join([str(filtered_jars[excluded])] + supplements)
+            # the device's ext classes (org.conscrypt, com.ibm.oti.net...) are not in the JDK
+            jcl = [str(args.jcl.resolve())] if args.jcl and level == "1.5" else []
+            classpath = os.pathsep.join([str(filtered_jars[excluded])] + supplements + jcl)
             input_rows = "".join("%s\t%s\t%s\n" % (level, target, path) for path in group)
             run = subprocess.run([java, "-Xmx4g", "-cp", str(runner), "IsolatedCompileRunner",
                                   str(args.jcl.resolve()) if args.jcl and level == "1.4" else "-",

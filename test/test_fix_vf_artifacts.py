@@ -100,3 +100,15 @@ def test_dangling_outer_field_with_this0_parameter():
     fixed, n = fix_text(src)
     assert n == 1 and "private final Outer this$0;" in fixed, fixed
     assert fix_text(fixed)[0] == fixed
+
+
+def test_literal_shapes():
+    src = ("public final class Double {\n    public static final double MAX_VALUE = MAX_VALUE;\n"
+           "    public static final double NaN = NaN;\n    public static final int MIN_VALUE = MIN_VALUE;\n"
+           "    void f() {\n        int flag = false;\n        boolean b;\n        b = (boolean)0;\n"
+           "        long big = MAX_VALUE;\n    }\n}\n")
+    fixed, n = fix_text(src)
+    assert "double MAX_VALUE = 1.7976931348623157E308;" in fixed, fixed
+    assert "double NaN = 0.0 / 0.0;" in fixed and "int MIN_VALUE = -2147483648;" in fixed, fixed
+    assert "int flag = 0;" in fixed and "b = false;" in fixed and "long big = MAX_VALUE;" in fixed, fixed
+    assert n == 5 and fix_text(fixed)[0] == fixed, (n, fixed)
